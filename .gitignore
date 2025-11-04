@@ -51,3 +51,6 @@ trace.zip
 # Playwright
 .ms-playwright/
 
+# History files
+.history/
+
