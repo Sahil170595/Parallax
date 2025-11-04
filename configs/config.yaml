@@ -1,0 +1,43 @@
+provider: auto  # openai | anthropic | local | auto
+planner:
+  max_tokens: 1200
+  temperature: 0.2
+  timeout_ms: 10000
+
+navigation:
+  action_budget: 30
+  default_wait_ms: 1000
+  self_heal_attempts: 1
+  scroll_margin_px: 64
+
+capture:
+  desktop_viewport: { width: 1366, height: 832 }
+  tablet_viewport: { width: 834, height: 1112 }
+  mobile_viewport: { width: 390, height: 844 }
+  crop_focus_padding_px: 16
+  redact:
+    enabled: true
+    selectors:
+      - input[type="password"]
+      - input[type="email"]
+      - [data-sensitive="true"]
+
+observer:
+  role_diff_threshold: 0.2
+  loader_timeout_ms: 8000
+  detection_poll_ms: 150
+
+output:
+  base_dir: datasets
+
+metrics:
+  prometheus_port: 9109
+
+playwright:
+  headless: true
+  project: chromium  # chromium | firefox | webkit
+
+vision:
+  enabled: false  # Enable vision-based enhancements
+  provider: openai  # openai | anthropic
+
