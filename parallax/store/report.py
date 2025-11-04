@@ -50,28 +50,33 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
         }}
         
         :root {{
-            --primary: #6366f1;
-            --primary-dark: #4f46e5;
-            --secondary: #8b5cf6;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-            --bg: #f8fafc;
-            --bg-dark: #1e293b;
-            --card: #ffffff;
-            --card-dark: #334155;
-            --text: #1e293b;
-            --text-light: #64748b;
-            --border: #e2e8f0;
-            --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
-            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --primary: #818cf8;
+            --primary-dark: #6366f1;
+            --secondary: #a78bfa;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --bg: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --card: #1e293b;
+            --card-hover: #334155;
+            --text: #f1f5f9;
+            --text-light: #94a3b8;
+            --text-dim: #64748b;
+            --border: #334155;
+            --border-light: #475569;
+            --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+            --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5);
             --radius: 12px;
             --radius-sm: 8px;
+            --glow: 0 0 20px rgba(129, 140, 248, 0.3);
         }}
         
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', 'Roboto', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
             min-height: 100vh;
             padding: 2rem;
             color: var(--text);
@@ -85,6 +90,20 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             padding: 2rem;
             border-radius: var(--radius);
             box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(10px);
+            animation: slideDown 0.5s ease;
+        }}
+        
+        @keyframes slideDown {{
+            from {{
+                opacity: 0;
+                transform: translateY(-20px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
         }}
         
         .header h1 {{
@@ -101,6 +120,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             color: var(--text-light);
             font-size: 1.1rem;
             margin-bottom: 1.5rem;
+            opacity: 0.9;
         }}
         
         .stats {{
@@ -117,6 +137,14 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             border-radius: var(--radius-sm);
             flex: 1;
             min-width: 150px;
+            box-shadow: var(--shadow);
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }}
+        
+        .stat-card:hover {{
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
         }}
         
         .stat-label {{
@@ -159,11 +187,14 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             box-shadow: var(--shadow);
             transition: all 0.3s ease;
             border: 1px solid var(--border);
+            animation: fadeIn 0.5s ease;
         }}
         
         .step:hover {{
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-lg);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-xl), var(--glow);
+            border-color: var(--border-light);
+            background: var(--card-hover);
         }}
         
         .step::before {{
@@ -176,7 +207,19 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             background: var(--primary);
             border-radius: 50%;
             border: 3px solid var(--card);
-            box-shadow: 0 0 0 2px var(--primary);
+            box-shadow: 0 0 0 2px var(--primary), 0 0 10px rgba(129, 140, 248, 0.5);
+            animation: pulse 2s ease-in-out infinite;
+        }}
+        
+        @keyframes pulse {{
+            0%, 100% {{
+                transform: scale(1);
+                opacity: 1;
+            }}
+            50% {{
+                transform: scale(1.1);
+                opacity: 0.8;
+            }}
         }}
         
         .step-header {{
@@ -192,11 +235,12 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             font-size: 0.875rem;
             font-weight: 600;
             color: var(--primary);
-            background: rgba(99, 102, 241, 0.1);
+            background: rgba(129, 140, 248, 0.15);
             padding: 0.375rem 0.75rem;
             border-radius: var(--radius-sm);
             text-transform: uppercase;
             letter-spacing: 0.05em;
+            border: 1px solid rgba(129, 140, 248, 0.3);
         }}
         
         .step-description {{
@@ -257,9 +301,10 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
         .metadata {{
             margin: 1.5rem 0;
             padding: 1rem;
-            background: var(--bg);
+            background: var(--bg-secondary);
             border-radius: var(--radius-sm);
             font-size: 0.875rem;
+            border: 1px solid var(--border);
         }}
         
         .metadata-item {{
@@ -283,10 +328,11 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             color: var(--text);
             font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
             font-size: 0.8125rem;
-            background: white;
+            background: var(--bg-tertiary);
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
             border: 1px solid var(--border);
+            color: var(--primary);
         }}
         
         .screenshots {{
@@ -301,27 +347,30 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             border-radius: var(--radius-sm);
             overflow: hidden;
             border: 1px solid var(--border);
-            background: var(--bg);
+            background: var(--bg-secondary);
             transition: all 0.3s ease;
         }}
         
         .screenshot-container:hover {{
             transform: scale(1.02);
-            box-shadow: var(--shadow-lg);
+            box-shadow: var(--shadow-lg), var(--glow);
+            border-color: var(--border-light);
         }}
         
         .screenshot-label {{
             position: absolute;
             top: 0.5rem;
             left: 0.5rem;
-            background: rgba(0, 0, 0, 0.7);
-            color: white;
+            background: rgba(15, 23, 42, 0.9);
+            color: var(--primary);
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
             font-size: 0.75rem;
             font-weight: 600;
             text-transform: capitalize;
             z-index: 1;
+            border: 1px solid var(--border-light);
+            backdrop-filter: blur(10px);
         }}
         
         .screenshot {{
@@ -350,14 +399,16 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             text-decoration: none;
             font-weight: 600;
             padding: 0.75rem 1.5rem;
-            background: rgba(99, 102, 241, 0.1);
+            background: rgba(129, 140, 248, 0.15);
             border-radius: var(--radius-sm);
             transition: all 0.2s ease;
+            border: 1px solid rgba(129, 140, 248, 0.3);
         }}
         
         .trace-link a:hover {{
-            background: rgba(99, 102, 241, 0.2);
-            transform: translateY(-1px);
+            background: rgba(129, 140, 248, 0.25);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow), var(--glow);
         }}
         
         .modal {{
@@ -368,8 +419,8 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             top: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0, 0, 0, 0.9);
-            backdrop-filter: blur(4px);
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(8px);
         }}
         
         .modal.active {{
@@ -380,8 +431,14 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
         }}
         
         @keyframes fadeIn {{
-            from {{ opacity: 0; }}
-            to {{ opacity: 1; }}
+            from {{
+                opacity: 0;
+                transform: translateY(10px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
         }}
         
         .modal-content {{
@@ -408,11 +465,11 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             position: absolute;
             top: 1rem;
             right: 1rem;
-            color: white;
+            color: var(--text);
             font-size: 2rem;
             font-weight: bold;
             cursor: pointer;
-            background: rgba(0, 0, 0, 0.5);
+            background: rgba(30, 41, 59, 0.8);
             width: 2.5rem;
             height: 2.5rem;
             border-radius: 50%;
@@ -420,11 +477,13 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             align-items: center;
             justify-content: center;
             transition: all 0.2s ease;
+            border: 1px solid var(--border);
         }}
         
         .close:hover {{
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(30, 41, 59, 1);
             transform: rotate(90deg);
+            box-shadow: var(--shadow-lg);
         }}
         
         @media (max-width: 768px) {{
@@ -497,7 +556,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
                 screenshots_html += f'''
                 <div class="screenshot-container">
                     <span class="screenshot-label">{viewport}</span>
-                    <img src="{filename}" alt="Step {idx:02d} - {viewport}" class="screenshot" onclick="openModal(this.src)" />
+                    <img src="{filename}" data-asset="{filename}" data-full-src="{filename}" alt="Step {idx:02d} - {viewport}" class="screenshot asset-img" onclick="openModal(this.getAttribute('data-full-src'))" />
                 </div>'''
             screenshots_html += '</div>'
         
@@ -524,7 +583,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
     html += f"""
         </div>
         <div class="trace-link">
-            <a href="{trace_zip}">
+            <a href="{trace_zip}" class="asset-link" data-asset="{trace_zip}">
                 <span>📦</span>
                 <span>Download trace.zip</span>
             </a>
@@ -560,6 +619,36 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
                 closeModal({{ target: {{ id: 'modal' }} }});
             }}
         }});
+
+        // Normalize asset paths when served via the API (HTTP/HTTPS)
+        (function() {{
+            if (window.location.protocol === 'file:') {{
+                // Local files already resolve relative to the report directory.
+                document.querySelectorAll('.asset-img').forEach(img => {{
+                    img.setAttribute('data-full-src', img.getAttribute('data-asset'));
+                }});
+                document.querySelectorAll('.asset-link').forEach(link => {{
+                    link.href = link.getAttribute('data-asset');
+                }});
+                return;
+            }}
+
+            const basePath = window.location.pathname.endsWith('/')
+                ? window.location.pathname
+                : window.location.pathname + '/';
+
+            document.querySelectorAll('.asset-img').forEach(img => {{
+                const name = img.getAttribute('data-asset');
+                const full = basePath + name;
+                img.src = full;
+                img.setAttribute('data-full-src', full);
+            }});
+
+            document.querySelectorAll('.asset-link').forEach(link => {{
+                const name = link.getAttribute('data-asset');
+                link.href = basePath + name;
+            }});
+        }})();
     </script>
 </body>
 </html>

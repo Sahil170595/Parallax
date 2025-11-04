@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import typer
 import yaml
@@ -19,7 +20,7 @@ from parallax.core.logging import configure_logging, get_logger
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
 from rich.markdown import Markdown
 from parallax.core.schemas import ExecutionPlan
 from parallax.agents.interpreter import Interpreter
@@ -107,13 +108,29 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
         total_runs = 1 + heal_attempts
         slug = _slugify(task)
 
+        start_url_current = start_url
+        action_budget_override: Optional[int] = None
+        plan_context_overrides: Dict[str, Any] = {}
+        failure_history: list[Dict[str, Any]] = []
+
         async def _run_attempt(attempt_index: int, attempt_slug: str) -> None:
+            nonlocal start_url_current, action_budget_override, plan_context_overrides
+
             attempt_label = f"Attempt {attempt_index + 1}/{total_runs}"
             if attempt_index > 0:
                 console.print(f"[cyan]↻ {attempt_label}[/cyan]")
 
+            plan_context: Dict[str, Any] = {
+                "start_url": start_url_current,
+                "retry": attempt_index,
+            }
+            if failure_history:
+                plan_context["failure_history"] = failure_history[-10:]
+            if plan_context_overrides:
+                plan_context.update(plan_context_overrides)
+
             with console.status("[bold cyan]Planning workflow...", spinner="dots"):
-                plan = await interpreter.plan(task, {"start_url": start_url})
+                plan = await interpreter.plan(task, plan_context)
 
             console.print(f"[green]✓[/green] Generated [bold]{len(plan.steps)}[/bold] steps")
 
@@ -138,29 +155,60 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                 tracer = TraceController(context)
                 await tracer.start()
 
-                action_budget = navigation_cfg.get("action_budget", 30)
-                navigator = Navigator(
-                    page,
-                    observer=observer,
-                    default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
-                    failure_store=failure_store,
-                    vision_analyzer=vision_analyzer,
-                    task_context=task,
-                )
+                action_budget = action_budget_override or navigation_cfg.get("action_budget", 30)
+                total_steps = max(1, min(len(plan.steps), action_budget))
 
-                with console.status("[bold cyan]Executing workflow...", spinner="dots"):
-                    await navigator.execute(plan, action_budget=action_budget)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    TextColumn("[dim]{task.completed}/{task.total}[/dim]"),
+                    TimeRemainingColumn(),
+                    console=console,
+                ) as progress:
+                    task_id = progress.add_task(
+                        "[cyan]Executing workflow...", total=total_steps
+                    )
+
+                    async def progress_callback(idx: int, total: int, _step: Any) -> None:
+                        progress.update(
+                            task_id,
+                            total=max(total, 1),
+                            completed=min(idx, total),
+                        )
+
+                    navigator = Navigator(
+                        page,
+                        observer=observer,
+                        default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
+                        failure_store=failure_store,
+                        vision_analyzer=vision_analyzer,
+                        task_context=task,
+                        progress_callback=progress_callback,
+                    )
+
+                    try:
+                        await navigator.execute(plan, action_budget=action_budget)
+                    finally:
+                        progress.update(
+                            task_id,
+                            completed=min(navigator.action_count, total_steps),
+                        )
 
                 nav_context = {
                     "page": page,
                     "action_budget": action_budget,
                     "action_count": navigator.action_count,
+                    "start_url": start_url_current,
                 }
                 trace_zip_path = task_dir / "trace.zip"
 
                 try:
                     nav_report = navigator.finalize(plan, nav_context)
-                except ConstitutionViolation:
+                except ConstitutionViolation as exc:
+                    recovered, adjustments = await navigator.heal(plan, nav_context, exc.failures)
+                    exc.recovery = {"recovered": recovered, "adjustments": adjustments}
                     with console.status("[bold cyan]Saving trace...", spinner="dots"):
                         await tracer.stop(trace_zip_path)
                     await context.close()
@@ -221,13 +269,57 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                 break
             except ConstitutionViolation as exc:
                 last_failure = exc
-                console.print("[red]⚠ Navigation validation failed[/red]")
+                failure_history.extend(
+                    {
+                        "rule": failure.rule_name,
+                        "reason": failure.reason,
+                        "details": failure.details,
+                    }
+                    for failure in exc.failures
+                )
+                if len(failure_history) > 20:
+                    del failure_history[:-20]
+                console.print("\n[red]❌ Navigation validation failed[/red]")
+                console.print("[dim]The workflow did not meet quality requirements.[/dim]\n")
+                
                 for failure in exc.failures:
-                    console.print(f"  [red]✗[/red] {failure.rule_name}: {failure.reason}")
+                    console.print(f"  [red]✗[/red] [bold]{failure.rule_name}[/bold]")
+                    console.print(f"      [dim]{failure.reason}[/dim]")
+                    
+                    # Add recovery suggestions based on rule
+                    suggestions = _get_recovery_suggestions(failure.rule_name)
+                    if suggestions:
+                        console.print(f"      [yellow]💡 Suggestions:[/yellow]")
+                        for suggestion in suggestions:
+                            console.print(f"         • {suggestion}")
+                    console.print()
+
+                recovery_info = getattr(exc, "recovery", {})
+                adjustments = recovery_info.get("adjustments") or {}
+                recovered = recovery_info.get("recovered", False)
+
+                notes = adjustments.get("notes") or []
+                if notes:
+                    console.print("[cyan]Self-heal actions:[/cyan]")
+                    for note in notes:
+                        console.print(f"  [cyan]-[/cyan] {note}")
+
+                if adjustments.get("start_url"):
+                    start_url_current = adjustments["start_url"]
+
+                if adjustments.get("plan_context"):
+                    plan_context_overrides.update(adjustments["plan_context"])
+
+                if adjustments.get("action_budget"):
+                    action_budget_override = adjustments["action_budget"]
+
                 if attempt == total_runs - 1:
                     console.print("[red]✖ Exhausted self-heal attempts[/red]")
+                    console.print("[yellow]💡 Try:[/yellow] Review the task description or check if the website structure has changed.\n")
                     raise
-                console.print("[yellow]Attempting self-heal and retry...[/yellow]")
+                if not recovered and not adjustments:
+                    console.print("[yellow]No automated recovery steps were available.[/yellow]")
+                console.print("[yellow]🔄 Attempting self-heal and retry...[/yellow]\n")
         else:
             if last_failure:
                 raise last_failure
@@ -239,7 +331,56 @@ def _slugify(text: str) -> str:
     return "-".join("".join(c.lower() if c.isalnum() else " " for c in text).split())
 
 
+def _get_recovery_suggestions(rule_name: str) -> list[str]:
+    """Get recovery suggestions based on failed rule."""
+    suggestions_map = {
+        "plan_structure": [
+            "Check if the task description is clear and actionable",
+            "Try rephrasing the task with more specific instructions",
+        ],
+        "plan_non_empty": [
+            "Add more detail so the planner can infer at least one actionable step",
+        ],
+        "plan_step_validity": [
+            "Check if the task uses supported actions (navigate, click, type, submit)",
+            "Try breaking down complex tasks into simpler steps",
+        ],
+        "navigation_success": [
+            "Check if the website is accessible and responsive",
+            "Verify that the start URL is correct",
+            "Try increasing the action budget in config.yaml",
+        ],
+        "action_budget": [
+            "Increase action_budget in config.yaml",
+            "Simplify the task to require fewer steps",
+        ],
+        "no_auth_redirects": [
+            "Ensure the account has access and is already authenticated",
+            "Consider providing login steps in the task description",
+        ],
+        "state_captured": [
+            "Check if screenshots directory is writable",
+            "Verify Playwright browser installation",
+        ],
+        "screenshot_quality": [
+            "Ensure the page finished loading before actions continue",
+            "Check for modal dialogs blocking the viewport",
+        ],
+        "dataset_created": [
+            "Check if datasets directory is writable",
+            "Verify disk space is available",
+        ],
+        "dataset_files": [
+            "Verify the archivist has permission to write report files",
+            "Look for antivirus or sync tools locking files during write",
+        ],
+        "dataset_data_integrity": [
+            "Check if the workflow captured the expected number of states",
+            "Ensure no external process is modifying dataset files mid-run",
+        ],
+    }
+    return suggestions_map.get(rule_name, [])
+
+
 if __name__ == "__main__":
     app()
-
-

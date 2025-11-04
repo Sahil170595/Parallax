@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
+import asyncio
+from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 
 from parallax.agents.constitutions import NAVIGATOR_CONSTITUTION
-from parallax.core.constitution import ConstitutionReport, ConstitutionViolation, FailureStore
+from parallax.core.constitution import (
+    ConstitutionReport,
+    ConstitutionViolation,
+    FailureStore,
+    ValidationFailure,
+)
 from parallax.core.logging import get_logger
 from parallax.core.metrics import workflow_failure
 from parallax.core.schemas import ExecutionPlan
@@ -46,6 +52,7 @@ class Navigator:
         failure_store: Optional[FailureStore] = None,
         vision_analyzer=None,
         task_context: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, Any], Awaitable[None]]] = None,
     ) -> None:
         self.page = page
         self.observer = observer
@@ -55,6 +62,7 @@ class Navigator:
         self.constitution = NAVIGATOR_CONSTITUTION
         self.vision_analyzer = vision_analyzer
         self.task_context = task_context
+        self.progress_callback = progress_callback
         self._workflow_states = []
 
     async def execute(self, plan: ExecutionPlan, action_budget: int = 30) -> None:
@@ -79,11 +87,20 @@ class Navigator:
         steps = plan.steps[:action_budget]
         self.action_count = 0
         self._workflow_states = []
-        
+        total_steps = len(steps) or 1
+
         for idx, step in enumerate(steps):
             if self.action_count >= action_budget:
                 log.warning("action_budget_exceeded", budget=action_budget)
                 break
+
+            if self.progress_callback:
+                try:
+                    progress_result = self.progress_callback(idx + 1, total_steps, step)
+                    if asyncio.iscoroutine(progress_result):
+                        await progress_result
+                except Exception as exc:
+                    log.warning("navigator_progress_callback_failed", error=str(exc))
             
             # Check for completion using vision analysis
             if self.vision_analyzer and self._workflow_states:
@@ -346,5 +363,96 @@ class Navigator:
             )
 
         return report
+
+    async def heal(
+        self,
+        plan: ExecutionPlan,
+        context: Dict[str, Any],
+        failures: Sequence[ValidationFailure],
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Attempt basic recovery actions after constitution failure.
+
+        Returns a tuple of (recovered, adjustments). Adjustments may include:
+          - start_url: override for the next attempt
+          - action_budget: increased budget for retries
+          - plan_context: dict merged into interpreter context during retry
+          - notes: human-readable notes about actions taken
+        """
+
+        adjustments: Dict[str, Any] = {"plan_context": {}, "notes": []}
+        recovered = False
+
+        page = context.get("page") or self.page
+        action_budget = context.get("action_budget")
+        start_url = context.get("start_url")
+
+        if not start_url:
+            for step in plan.steps:
+                if step.action == "navigate" and step.target:
+                    start_url = step.target
+                    break
+
+        def _ensure_failure_history() -> Dict[str, list]:
+            return adjustments.setdefault("plan_context", {}).setdefault("failure_history", [])
+
+        for failure in failures:
+            rule = failure.rule_name
+            _ensure_failure_history().append(
+                {
+                    "rule": rule,
+                    "reason": failure.reason,
+                    "details": failure.details,
+                }
+            )
+
+            if rule == "navigation_success":
+                target = failure.details.get("final_url") or start_url
+                if not target:
+                    for step in plan.steps:
+                        if step.action == "navigate" and step.target:
+                            target = step.target
+                            break
+                if target:
+                    try:
+                        await page.goto(target)
+                        await page.wait_for_load_state()
+                        adjustments["start_url"] = target
+                        adjustments.setdefault("notes", []).append(
+                            f"Reloaded start URL '{target}' after navigation failure."
+                        )
+                        recovered = True
+                    except Exception as exc:
+                        log.warning("navigator_heal_navigation_reload_failed", error=str(exc))
+
+            elif rule == "no_auth_redirects":
+                if start_url:
+                    try:
+                        await page.goto(start_url)
+                        await page.wait_for_load_state()
+                        adjustments["start_url"] = start_url
+                        adjustments.setdefault("notes", []).append(
+                            "Auth redirect detected; returned to start URL for retry."
+                        )
+                        recovered = True
+                    except Exception as exc:
+                        log.warning("navigator_heal_auth_redirect_failed", error=str(exc))
+                adjustments.setdefault("plan_context", {}).setdefault("flags", []).append(
+                    "auth_redirect_detected"
+                )
+
+            elif rule == "action_budget" and action_budget:
+                new_budget = action_budget + 5
+                adjustments["action_budget"] = new_budget
+                adjustments.setdefault("notes", []).append(
+                    f"Increased action budget to {new_budget}."
+                )
+                recovered = True
+
+        if not adjustments.get("plan_context"):
+            adjustments.pop("plan_context", None)
+        if not adjustments.get("notes"):
+            adjustments.pop("notes", None)
+
+        return recovered, adjustments
 
 
