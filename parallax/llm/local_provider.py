@@ -24,19 +24,92 @@ class LocalPlanner:
 
     async def generate_plan(self, task: str, context: Dict) -> ExecutionPlan:
         client = await self._get_client()
-        prompt = f"""You are a web automation planner. Generate a JSON plan.
+        start_url = context.get("start_url", "https://example.com")
+        prompt = f"""You are a web automation planner. Generate a JSON plan with ordered steps.
 
 Task: {task}
+Start URL: {start_url}
 
-Actions:
+Available Actions:
 - navigate: {{"action": "navigate", "target": "https://example.com"}}
-- click: {{"action": "click", "role": "button", "name": "Create"}}
+- click: {{"action": "click", "role": "button", "name": "Create"}} or {{"action": "click", "role": "link", "name": "About"}} or {{"action": "click", "selector": "button[data-testid='submit']"}}
 - type: {{"action": "type", "selector": "input[name='title']", "value": "My Title"}}
 - submit: {{"action": "submit", "selector": "button[type='submit']"}}
+- wait: {{"action": "wait", "value": "2s"}}
+- scroll: {{"action": "scroll", "value": "down"}} or {{"action": "scroll", "selector": "#section"}}
 
-Return JSON: {{"steps": [...]}}
+Examples:
+Task: "Explore all tabs on a website"
+{{
+  "steps": [
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "wait", "value": "1s"}},
+    {{"action": "click", "role": "link", "name": "About"}},
+    {{"action": "wait", "value": "1s"}},
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "click", "role": "link", "name": "Services"}},
+    {{"action": "wait", "value": "1s"}},
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "click", "role": "link", "name": "Contact"}},
+    {{"action": "wait", "value": "1s"}}
+  ]
+}}
 
-Start URL: {context.get("start_url", "https://example.com")}"""
+Task: "Navigate to softlight.com and explore all tabs on that website"
+{{
+  "steps": [
+    {{"action": "navigate", "target": "https://softlight.com"}},
+    {{"action": "wait", "value": "2s"}},
+    {{"action": "click", "role": "link", "name": "We're hiring"}},
+    {{"action": "wait", "value": "2s"}},
+    {{"action": "navigate", "target": "https://softlight.com"}},
+    {{"action": "click", "role": "link", "name": "Join waitlist"}},
+    {{"action": "wait", "value": "1s"}}
+  ]
+}}
+
+Task: "Navigate to a website and explore the full website"
+{{
+  "steps": [
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "wait", "value": "2s"}},
+    {{"action": "scroll", "value": "down"}},
+    {{"action": "wait", "value": "1s"}},
+    {{"action": "click", "role": "link", "name": "About"}},
+    {{"action": "wait", "value": "2s"}},
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "click", "role": "link", "name": "Services"}},
+    {{"action": "wait", "value": "2s"}},
+    {{"action": "navigate", "target": "{start_url}"}},
+    {{"action": "scroll", "value": "down"}},
+    {{"action": "wait", "value": "1s"}}
+  ]
+}}
+
+EXPLORATION STRATEGY:
+When the task contains keywords like "explore", "all tabs", "full website", "navigate through", or "find":
+1. ALWAYS start by navigating to the start URL
+2. Add a wait step (1-2s) after navigation to let the page load
+3. Systematically identify and click on ALL navigation elements:
+   - Main navigation links (header/nav menu)
+   - Tab buttons
+   - Menu items
+   - Primary call-to-action buttons
+   - Important content links (not footer/social links unless explicitly requested)
+4. For each click, navigate back to the start URL before clicking the next element
+5. Include wait steps between actions to allow pages to load
+6. For "full website" or "explore the site", also include scroll actions to discover more content
+7. Prioritize main navigation elements over footer/social links
+
+When exploring, think about what a user would see on screen:
+- Navigation bars at the top
+- Tab buttons
+- Menu dropdowns
+- Primary action buttons
+- Main content links
+
+Generate a comprehensive plan that explores all visible navigation elements systematically.
+Return JSON with "steps" array: {{"steps": [...]}}"""
         
         try:
             resp = await client.post(

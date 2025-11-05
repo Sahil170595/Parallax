@@ -29,7 +29,6 @@ from parallax.agents.observer import Observer
 from parallax.observer.detectors import Detectors
 from parallax.agents.archivist import Archivist
 from parallax.llm.openai_provider import OpenAIPlanner
-from parallax.llm.anthropic_provider import AnthropicPlanner
 from parallax.llm.local_provider import LocalPlanner
 from parallax.core.trace import TraceController
 
@@ -48,18 +47,13 @@ def _planner_from_config(cfg: dict):
     provider = os.getenv("PARALLAX_PROVIDER", cfg.get("provider", "auto"))
     if provider == "openai":
         return OpenAIPlanner()
-    if provider == "anthropic":
-        return AnthropicPlanner()
     if provider == "local":
         return LocalPlanner()
-    # auto: prefer OpenAI, then Anthropic, then Local
+    # auto: prefer OpenAI, then Local
     try:
         return OpenAIPlanner()
     except Exception:
-        try:
-            return AnthropicPlanner()
-        except Exception:
-            return LocalPlanner()
+        return LocalPlanner()
 
 
 @app.command()
@@ -182,6 +176,7 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                         page,
                         observer=observer,
                         default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
+                        scroll_margin_px=navigation_cfg.get("scroll_margin_px", 64),
                         failure_store=failure_store,
                         vision_analyzer=vision_analyzer,
                         task_context=task,

@@ -53,6 +53,7 @@ async with async_playwright() as p:
         page,
         observer=observer,
         default_wait_ms=1000,
+        scroll_margin_px=64,
         vision_analyzer=vision_analyzer,
         task_context="Create a project in Linear"
     )

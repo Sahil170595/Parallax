@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
+import re
+import unicodedata
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from parallax.agents.constitutions import NAVIGATOR_CONSTITUTION
 from parallax.core.constitution import (
@@ -30,9 +32,11 @@ class Navigator:
         page: Playwright Page object for browser interaction
         observer: Optional Observer agent for capturing UI states
         default_wait_ms: Default wait time in milliseconds between actions
+        scroll_margin_px: Margin used when scrolling page-level (default: 64)
         failure_store: Optional store for tracking constitution failures
         vision_analyzer: Optional VisionAnalyzer for vision-based completion detection and element location
         task_context: Optional task context string for vision analysis
+        progress_callback: Optional callback for progress updates
     
     Example:
         >>> from playwright.async_api import async_playwright
@@ -44,11 +48,21 @@ class Navigator:
         ...     await navigator.execute(plan, action_budget=30)
     """
     
+    _SMART_TO_ASCII_TABLE = str.maketrans(
+        "\u2018\u2019\u201a\u201c\u201d\u201e\u2013\u2014\u2011\u00a0",
+        chr(39)*4 + chr(34)*3 + chr(45)*2 + chr(32),
+    )
+    _ASCII_TO_SMART_TABLE = str.maketrans(
+        "'\"",
+        "\u2019\u201d",  # smart apostrophe and quote
+    )
+
     def __init__(
         self,
         page,
         observer=None,
         default_wait_ms: int = 1000,
+        scroll_margin_px: int = 64,
         failure_store: Optional[FailureStore] = None,
         vision_analyzer=None,
         task_context: Optional[str] = None,
@@ -64,6 +78,10 @@ class Navigator:
         self.task_context = task_context
         self.progress_callback = progress_callback
         self._workflow_states = []
+        try:
+            self.scroll_margin_px = max(0, int(scroll_margin_px))
+        except (TypeError, ValueError):
+            self.scroll_margin_px = 64
 
     async def execute(self, plan: ExecutionPlan, action_budget: int = 30) -> None:
         """
@@ -133,12 +151,29 @@ class Navigator:
                     if state:
                         self._workflow_states.append(state.__dict__)
             except Exception as e:
-                log.error("step_failed", step=step.action, error=str(e))
+                log.error("step_failed", step=step.action, error=str(e), step_details={
+                    "action": step.action,
+                    "target": step.target,
+                    "selector": step.selector,
+                    "name": step.name,
+                    "role": step.role
+                })
                 workflow_failure.inc()
+                
+                # Capture state even when step fails (for debugging)
+                if self.observer is not None:
+                    action_desc = self._describe_action(step) + " [FAILED]"
+                    try:
+                        state = await self.observer.observe(action_desc)
+                        if state:
+                            self._workflow_states.append(state.__dict__)
+                    except Exception:
+                        pass  # If state capture also fails, continue
                 
                 # Try vision-based fallback if selector failed
                 if self.vision_analyzer and step.action in ["click", "type", "submit"]:
                     try:
+                        log.info("trying_vision_fallback", step=step.action)
                         await self._run_step_vision_fallback(step)
                         self.action_count += 1
                         if self.observer is not None:
@@ -155,41 +190,149 @@ class Navigator:
                     log.warning("auth_redirect_detected")
                     # In production, would invoke re-auth hook
                     break
+                
+                # For click actions, log more details about the failure
+                if step.action == "click":
+                    log.warning("click_action_failed", 
+                               selector=step.selector,
+                               name=step.name,
+                               role=step.role,
+                               error=str(e))
+                
                 # Continue with next step after error
                 continue  # Continue to next iteration
 
     async def _run_step(self, step, retries: int = 3) -> None:
         action = step.action
         if action == "navigate" and step.target:
-            await self.page.goto(step.target)
-            await self.page.wait_for_load_state()
+            await self._robust_navigate(step.target)
+            return
+        if action == "wait":
+            await self._run_wait(step)
+            return
+        if action == "scroll":
+            await self._run_scroll(step)
             return
         if action == "click":
             for attempt in range(retries):
                 try:
                     locator = await self._resolve_locator_with_retry(step, attempt)
+                    # Handle multiple matches by using first if selector is used
+                    if step.selector and await locator.count() > 1:
+                        locator = locator.first
+                    
+                    # Dismiss modals that might block the click
+                    await self._dismiss_modals_if_safe()
+                    
+                    # Wait for element to be stable and interactable
+                    await self._wait_for_element_stable(locator, timeout=5000)
+                    await self._wait_for_interactable(locator, timeout=5000)
                     await locator.scroll_into_view_if_needed()
-                    await locator.wait_for(state="visible", timeout=5000)
-                    await locator.click()
+                    
+                    # Get href to check if it's an external link
+                    href = await locator.get_attribute("href")
+                    target = await locator.get_attribute("target")
+                    current_url = self.page.url
+                    
+                    # Try normal click with navigation wait
+                    try:
+                        # Check if link opens in new tab/window
+                        if target == "_blank":
+                            # Handle new tab/window
+                            async with self.page.context.expect_page(timeout=5000) as new_page_info:
+                                await locator.click(timeout=5000)
+                            new_page = await new_page_info.value
+                            await new_page.wait_for_load_state("networkidle")
+                            # Switch to the new page
+                            self.page = new_page
+                        elif href and (href.startswith("http") or href.startswith("//")):
+                            # External link - wait for navigation
+                            try:
+                                async with self.page.expect_navigation(timeout=15000, wait_until="networkidle"):
+                                    await locator.click(timeout=5000)
+                            except Exception:
+                                # If networkidle times out, try domcontentloaded
+                                async with self.page.expect_navigation(timeout=15000, wait_until="domcontentloaded"):
+                                    await locator.click(timeout=5000)
+                                # Wait a bit more for JS to finish
+                                await self.page.wait_for_timeout(2000)
+                        else:
+                            # Same-page navigation - wait for navigation
+                            try:
+                                async with self.page.expect_navigation(timeout=10000, wait_until="networkidle"):
+                                    await locator.click(timeout=5000)
+                            except Exception:
+                                # If networkidle times out, try domcontentloaded
+                                async with self.page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
+                                    await locator.click(timeout=5000)
+                                await self.page.wait_for_timeout(1000)
+                    except Exception as nav_error:
+                        # If navigation wait fails, try click without wait
+                        try:
+                            await locator.click(timeout=5000)
+                            # Wait for potential navigation
+                            await self.page.wait_for_timeout(2000)
+                            # Check if URL changed
+                            new_url = self.page.url
+                            if new_url != current_url:
+                                # URL changed, wait for load
+                                try:
+                                    await self.page.wait_for_load_state("networkidle", timeout=5000)
+                                except Exception:
+                                    await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                        except Exception as click_error:
+                            # If click is intercepted, try force click
+                            try:
+                                await locator.click(force=True, timeout=5000)
+                                await self.page.wait_for_timeout(2000)
+                                # Check if URL changed after force click
+                                new_url = self.page.url
+                                if new_url != current_url:
+                                    try:
+                                        await self.page.wait_for_load_state("networkidle", timeout=5000)
+                                    except Exception:
+                                        await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            except Exception as force_error:
+                                log.warning("click_failed_after_all_attempts", error=str(force_error))
+                                raise
                     return
                 except Exception as e:
                     if attempt == retries - 1:
                         raise
-                    log.warning("click_retry", attempt=attempt + 1, error=str(e))
-                    await self.page.wait_for_timeout(500)
+                    # Exponential backoff: wait longer on each retry
+                    wait_time = 500 * (2 ** attempt)
+                    log.warning("click_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
+                    await self.page.wait_for_timeout(wait_time)
             return
         if action == "type" and step.selector and step.value is not None:
             for attempt in range(retries):
                 try:
+                    # Dismiss modals first
+                    await self._dismiss_modals_if_safe()
+                    
                     loc = self.page.locator(step.selector)
-                    await loc.wait_for(state="visible", timeout=5000)
+                    await self._wait_for_interactable(loc, timeout=5000)
+                    
+                    # Clear field first if needed
+                    await loc.click(timeout=2000)
+                    await loc.fill("")  # Clear existing content
                     await loc.fill(step.value)
+                    
+                    # Verify value was set
+                    actual_value = await loc.input_value()
+                    if actual_value != step.value:
+                        # Try again with clear and type
+                        await loc.click(timeout=2000)
+                        await loc.fill("")
+                        await loc.type(step.value, delay=50)  # Type with delay for slow inputs
+                    
                     return
                 except Exception as e:
                     if attempt == retries - 1:
                         raise
-                    log.warning("type_retry", attempt=attempt + 1, error=str(e))
-                    await self.page.wait_for_timeout(500)
+                    wait_time = 500 * (2 ** attempt)
+                    log.warning("type_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
+                    await self.page.wait_for_timeout(wait_time)
             return
         if action == "submit" and step.selector:
             for attempt in range(retries):
@@ -205,64 +348,491 @@ class Navigator:
                     await self.page.wait_for_timeout(500)
             return
 
-    async def _resolve_locator_with_retry(self, step, attempt: int = 0):
-        """Resolve locator with fallback strategies."""
-        # Primary: role + name
-        if step.role:
-            if step.name:
-                try:
-                    return self.page.getByRole(step.role, name=step.name)
-                except Exception:
-                    pass
+    async def _robust_navigate(self, url: str) -> None:
+        """Navigate to URL with multiple fallback strategies."""
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
-                return self.page.getByRole(step.role)
+                # Try navigation with networkidle wait
+                await self.page.goto(url, wait_until="networkidle", timeout=30000)
+                # Verify navigation succeeded
+                await self.page.wait_for_load_state("networkidle", timeout=5000)
+                return
+            except Exception as e:
+                if attempt == max_attempts - 1:
+                    # Last attempt: try with domcontentloaded
+                    try:
+                        await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await self.page.wait_for_timeout(2000)  # Give JS time to run
+                        return
+                    except Exception as final_error:
+                        log.warning("navigation_failed_all_attempts", url=url, error=str(final_error))
+                        raise
+                log.warning("navigation_retry", attempt=attempt + 1, url=url, error=str(e))
+                await self.page.wait_for_timeout(1000 * (attempt + 1))  # Exponential backoff
+
+    async def _dismiss_modals_if_safe(self) -> None:
+        """Attempt to dismiss common modals/popups that might block interactions."""
+        try:
+            # Check for common modal patterns
+            modal_selectors = [
+                '[role="dialog"]',
+                '[role="alertdialog"]',
+                '.modal',
+                '.popup',
+                '[data-modal]',
+                '[data-popup]',
+            ]
+            
+            for selector in modal_selectors:
+                try:
+                    modal = self.page.locator(selector).first
+                    if await modal.count() > 0:
+                        # Look for close button
+                        close_selectors = [
+                            'button[aria-label*="close" i]',
+                            'button[aria-label*="dismiss" i]',
+                            'button.close',
+                            '[data-dismiss="modal"]',
+                            'button:has-text("Close")',
+                            'button:has-text("×")',
+                        ]
+                        for close_sel in close_selectors:
+                            try:
+                                close_btn = modal.locator(close_sel).first
+                                if await close_btn.count() > 0:
+                                    await close_btn.click(timeout=2000)
+                                    await self.page.wait_for_timeout(500)
+                                    log.info("dismissed_modal", selector=selector, close_button=close_sel)
+                                    return
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+        except Exception as e:
+            log.debug("modal_dismiss_failed", error=str(e))
+
+    async def _wait_for_element_stable(self, locator, timeout: int = 5000) -> None:
+        """Wait for element to be stable (not moving, not changing size)."""
+        try:
+            # Wait for element to be visible
+            await locator.wait_for(state="visible", timeout=timeout)
+            
+            # Wait for element to be stable (not animating)
+            for _ in range(5):  # Check 5 times
+                await self.page.wait_for_timeout(200)
+                # Element should be in viewport and stable
+                box = await locator.bounding_box()
+                if box:
+                    # Check if element is reasonably sized and positioned
+                    if box['width'] > 0 and box['height'] > 0:
+                        break
+        except Exception:
+            pass  # If stability check fails, continue anyway
+
+    async def _wait_for_interactable(self, locator, timeout: int = 5000) -> None:
+        """Wait for element to be interactable (visible, enabled, not covered)."""
+        try:
+            await locator.wait_for(state="visible", timeout=timeout)
+            # Check if element is enabled
+            is_disabled = await locator.get_attribute("disabled")
+            if is_disabled:
+                raise ValueError("Element is disabled")
+            # Check if element is not covered by overlay
+            try:
+                await locator.scroll_into_view_if_needed()
             except Exception:
                 pass
-        
-        # Fallback: data-testid heuristic
-        if step.selector and "data-testid" not in step.selector:
-            # Try to find by data-testid if name matches common patterns
-            if step.name:
-                testid_variants = [
-                    f'[data-testid="{step.name.lower().replace(" ", "-")}"]',
-                    f'[data-testid="{step.name.lower().replace(" ", "_")}"]',
-                    f'[data-testid*="{step.name.lower()}"]',
-                ]
-                for testid in testid_variants:
-                    try:
-                        loc = self.page.locator(testid)
-                        if await loc.count() > 0:
-                            return loc.first
-                    except Exception:
-                        continue
-        
-        # Fallback: CSS selector
+        except Exception as e:
+            log.debug("wait_for_interactable_failed", error=str(e))
+            raise
+
+    async def _resolve_locator_with_retry(self, step, attempt: int = 0):
+        """Resolve locator with multiple resilient strategies."""
+        variants = self._text_variants(step.name) if step.name else []
+
+        # Role-based resolution
+        if step.role:
+            if variants:
+                locator = await self._first_matching_locator(
+                    self._role_locators(step.role, variants)
+                )
+                if locator:
+                    return locator
+            else:
+                locator = await self._first_matching_locator(
+                    [self.page.get_by_role(step.role)]
+                )
+                if locator:
+                    return locator
+
+        # data-testid heuristics derived from text
+        if variants:
+            locator = await self._resolve_data_testid(variants)
+            if locator:
+                return locator
+
+        # Direct selector fallback
         if step.selector:
             try:
-                return self.page.locator(step.selector)
-            except Exception:
-                pass
-        
-        # Fallback: text match
-        if step.name:
-            try:
-                return self.page.getByText(step.name, exact=False)
-            except Exception:
-                pass
-        
+                locator = await self._first_matching_locator(
+                    [self.page.locator(step.selector)]
+                )
+                if locator:
+                    return locator
+            except Exception as exc:
+                log.debug("navigator_selector_lookup_failed", selector=step.selector, error=str(exc))
+
+        # Text-based fallbacks (regex, has-text, etc.)
+        if variants:
+            locator = await self._first_matching_locator(
+                self._text_locators(variants, preferred_role=step.role)
+            )
+            if locator:
+                return locator
+            locator = await self._first_matching_locator(
+                self._xpath_locators(variants, preferred_role=step.role)
+            )
+            if locator:
+                return locator
+
+        await self._log_locator_diagnostics(step, variants)
         raise ValueError(f"Insufficient selector info for {step.action}")
 
     def _resolve_locator(self, step):
         """Legacy method - use _resolve_locator_with_retry instead."""
         if step.role:
             if step.name:
-                return self.page.getByRole(step.role, name=step.name)
-            return self.page.getByRole(step.role)
+                return self.page.get_by_role(step.role, name=step.name)
+            return self.page.get_by_role(step.role)
         if step.selector:
             return self.page.locator(step.selector)
         if step.name:
-            return self.page.getByText(step.name, exact=False)
+            return self.page.get_by_text(step.name, exact=False)
         raise ValueError("Insufficient selector info for click")
+
+    def _role_locators(self, role: str, variants: Iterable[str]):
+        """Generate locator candidates based on role and text variants."""
+        regex_cache: Dict[str, re.Pattern[str]] = {}
+        for variant in variants:
+            yield self.page.get_by_role(role, name=variant, exact=True)
+            yield self.page.get_by_role(role, name=variant, exact=False)
+            regex = regex_cache.setdefault(variant, self._text_regex(variant))
+            yield self.page.get_by_role(role, name=regex)
+            try:
+                yield self.page.get_by_role(role).filter(has_text=regex)
+            except Exception:
+                pass
+            for selector in self._role_selector_candidates(role):
+                try:
+                    yield self.page.locator(selector).filter(has_text=regex)
+                except Exception:
+                    continue
+
+    def _text_locators(self, variants: Iterable[str], preferred_role: Optional[str]):
+        """Generate locator candidates based on text variants."""
+        for variant in variants:
+            regex = self._text_regex(variant)
+            attr_literal = self._selector_literal(variant)
+            locators = [
+                self.page.get_by_text(variant, exact=True),
+                self.page.get_by_text(variant, exact=False),
+                self.page.get_by_text(regex),
+                self.page.locator(f"text={self._selector_literal(variant)}"),
+                self.page.locator(f"[aria-label={attr_literal}]"),
+                self.page.locator(f"[aria-label*={attr_literal}]"),
+                self.page.locator(f"[title={attr_literal}]"),
+                self.page.locator(f"[title*={attr_literal}]"),
+            ]
+            for selector in self._role_selector_candidates(preferred_role):
+                try:
+                    locators.append(self.page.locator(selector).filter(has_text=regex))
+                except Exception:
+                    continue
+            try:
+                locators.append(self.page.locator("a").filter(has_text=regex))
+            except Exception:
+                pass
+            try:
+                locators.append(self.page.locator('[role="link"]').filter(has_text=regex))
+            except Exception:
+                pass
+            try:
+                locators.append(self.page.locator('[aria-label]').filter(has_text=regex))
+            except Exception:
+                pass
+            try:
+                locators.append(self.page.locator('[title]').filter(has_text=regex))
+            except Exception:
+                pass
+            for locator in locators:
+                yield locator
+
+    def _xpath_locators(self, variants: Iterable[str], preferred_role: Optional[str]):
+        """Generate XPath-based fallback locators."""
+        conditions = self._role_xpath_conditions(preferred_role)
+        predicate = " or ".join(conditions) if conditions else None
+        for variant in variants:
+            literal = self._xpath_literal(variant)
+            if predicate:
+                yield self.page.locator(f"xpath=//*[{predicate}][normalize-space(.)={literal}]")
+                yield self.page.locator(f"xpath=//*[{predicate}][contains(normalize-space(.), {literal})]")
+            else:
+                yield self.page.locator(f"xpath=//*[normalize-space(.)={literal}]")
+                yield self.page.locator(f"xpath=//*[contains(normalize-space(.), {literal})]")
+
+    def _role_selector_candidates(self, role: Optional[str]) -> List[str]:
+        if not role:
+            return []
+        role_map = {
+            "link": ["a", '[role="link"]'],
+            "button": ["button", '[role="button"]', "input[type='button']", "input[type='submit']"],
+            "menuitem": ['[role="menuitem"]'],
+            "tab": ['[role="tab"]'],
+            "checkbox": ["input[type='checkbox']", '[role="checkbox"]'],
+            "radio": ["input[type='radio']", '[role="radio"]'],
+            "option": ["option", '[role="option"]'],
+        }
+        selectors = role_map.get(role)
+        if selectors:
+            return selectors
+        return [f'[role="{role}"]']
+
+    def _role_xpath_conditions(self, role: Optional[str]) -> List[str]:
+        base_conditions = ["self::a", "@role='link'", "@role='button'", "self::button", "self::input[@type='button']", "self::input[@type='submit']"]
+        if not role:
+            return base_conditions
+        role_map = {
+            "link": ["self::a", "@role='link'"],
+            "button": ["self::button", "@role='button'", "self::input[@type='button']", "self::input[@type='submit']"],
+            "menuitem": ["@role='menuitem'"],
+            "tab": ["@role='tab'"],
+            "checkbox": ["@role='checkbox'", "self::input[@type='checkbox']"],
+            "radio": ["@role='radio'", "self::input[@type='radio']"],
+            "option": ["@role='option'", "self::option"],
+        }
+        return role_map.get(role, base_conditions)
+
+    def _selector_literal(self, text: str) -> str:
+        escaped = (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("`", "\\`")
+            .replace("\n", "\\A ")
+        )
+        return f'"{escaped}"'
+
+    def _xpath_literal(self, text: str) -> str:
+        if "'" not in text:
+            return f"'{text}'"
+        if '"' not in text:
+            return f'"{text}"'
+        parts = text.split("'")
+        concat_parts = []
+        for idx, part in enumerate(parts):
+            if part:
+                concat_parts.append(f"'{part}'")
+            if idx != len(parts) - 1:
+                concat_parts.append('"\'"')
+        return "concat(" + ", ".join(concat_parts) + ")"
+
+    def _text_regex(self, text: str) -> re.Pattern[str]:
+        return re.compile(re.escape(text), re.IGNORECASE)
+
+    async def _first_matching_locator(self, locators: Iterable[Any]) -> Optional[Any]:
+        for locator in locators:
+            if locator is None:
+                continue
+            try:
+                count = await locator.count()
+            except Exception as exc:
+                log.debug("navigator_locator_count_failed", error=str(exc))
+                continue
+            if count > 0:
+                try:
+                    return locator.first if count > 1 else locator
+                except Exception:
+                    return locator
+        return None
+
+    async def _resolve_data_testid(self, variants: Iterable[str]) -> Optional[Any]:
+        selectors: List[str] = []
+        seen: Set[str] = set()
+        for variant in variants:
+            base = self._collapse_whitespace(variant).lower()
+            if not base:
+                continue
+            ascii_base = base.translate(self._SMART_TO_ASCII_TABLE)
+            for value in {base, ascii_base}:
+                if not value:
+                    continue
+                dash = value.replace(" ", "-")
+                underscore = value.replace(" ", "_")
+                for selector in (
+                    f'[data-testid="{dash}"]',
+                    f'[data-testid="{underscore}"]',
+                    f'[data-testid*="{value}"]',
+                ):
+                    if selector not in seen:
+                        seen.add(selector)
+                        selectors.append(selector)
+        if not selectors:
+            return None
+        locator_candidates = []
+        for selector in selectors:
+            try:
+                locator_candidates.append(self.page.locator(selector))
+            except Exception as exc:
+                log.debug("navigator_data_testid_selector_failed", selector=selector, error=str(exc))
+        if not locator_candidates:
+            return None
+        return await self._first_matching_locator(locator_candidates)
+
+    async def _log_locator_diagnostics(self, step, variants: List[str]) -> None:
+        try:
+            sample_texts: List[str] = []
+            if step.role:
+                try:
+                    sample_locator = self.page.get_by_role(step.role)
+                    sample_texts = await sample_locator.all_inner_texts()
+                except Exception:
+                    sample_texts = []
+            log.debug(
+                "navigator_locator_debug",
+                action=step.action,
+                role=step.role,
+                selector=step.selector,
+                name=step.name,
+                variants=variants[:5],
+                sample_texts=[self._collapse_whitespace(s) for s in sample_texts[:10]],
+            )
+        except Exception as exc:
+            log.debug("navigator_locator_debug_failed", error=str(exc))
+
+    def _text_variants(self, text: str) -> List[str]:
+        variants: List[str] = []
+        seen: Set[str] = set()
+
+        def add(candidate: str) -> None:
+            collapsed = self._collapse_whitespace(candidate)
+            if collapsed and collapsed not in seen:
+                seen.add(collapsed)
+                variants.append(collapsed)
+
+        base = str(text)
+        normalized = unicodedata.normalize("NFKC", base)
+        add(base)
+        add(normalized)
+        add(base.translate(self._SMART_TO_ASCII_TABLE))
+        add(normalized.translate(self._SMART_TO_ASCII_TABLE))
+        add(base.translate(self._ASCII_TO_SMART_TABLE))
+        add(normalized.translate(self._ASCII_TO_SMART_TABLE))
+        add(base.lower())
+        add(base.casefold())
+        add(base.title())
+        return variants
+
+    def _collapse_whitespace(self, text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+
+    async def _run_wait(self, step) -> None:
+        """Pause execution for a specified duration (milliseconds)."""
+        duration_ms = self._parse_wait_duration(step)
+        if duration_ms < 0:
+            duration_ms = self.default_wait_ms
+        await self.page.wait_for_timeout(duration_ms)
+
+    def _parse_wait_duration(self, step) -> int:
+        """Parse wait duration from plan step."""
+        raw = step.value or step.target
+        if raw is None:
+            return self.default_wait_ms
+        try:
+            if isinstance(raw, (int, float)):
+                return max(0, int(float(raw)))
+            text = str(raw).strip().lower()
+            if text.endswith("ms"):
+                text = text[:-2].strip()
+                return max(0, int(float(text)))
+            if text.endswith("s"):
+                text = text[:-1].strip()
+                return max(0, int(float(text) * 1000))
+            return max(0, int(float(text)))
+        except (ValueError, TypeError):
+            log.warning("navigator_wait_parse_failed", value=str(raw))
+            return self.default_wait_ms
+
+    async def _run_scroll(self, step) -> None:
+        """Scroll viewport or element according to plan step."""
+        locator = await self._resolve_scroll_locator(step)
+        if locator is not None:
+            try:
+                await locator.scroll_into_view_if_needed()
+                await self.page.wait_for_timeout(200)
+                return
+            except Exception as exc:
+                log.debug("navigator_scroll_element_failed", error=str(exc))
+        
+        # Fallback to page-level scrolling
+        await self._fallback_scroll(step)
+
+    async def _resolve_scroll_locator(self, step) -> Optional[Any]:
+        """Resolve locator for scroll action if specified."""
+        try:
+            if step.selector:
+                loc = self.page.locator(step.selector)
+                if await loc.count() > 0:
+                    return loc.first
+            if step.role:
+                if step.name:
+                    loc = self.page.get_by_role(step.role, name=step.name)
+                else:
+                    loc = self.page.get_by_role(step.role)
+                if await loc.count() > 0:
+                    return loc.first
+            if step.name and not step.selector and not step.role:
+                loc = self.page.get_by_text(step.name, exact=False)
+                if await loc.count() > 0:
+                    return loc.first
+        except Exception as exc:
+            log.debug("navigator_scroll_locator_unresolved", error=str(exc))
+        return None
+
+    async def _fallback_scroll(self, step) -> None:
+        """Fallback scrolling using window scrolling."""
+        direction = step.value or "down"
+        pixels = self._parse_scroll_pixels(step.value)
+        
+        if pixels is None:
+            # Default to viewport-based scrolling
+            viewport_height = self.page.viewport_size.get("height", 900) if self.page.viewport_size else 900
+            pixels = viewport_height - self.scroll_margin_px
+        
+        if direction.lower() == "up":
+            pixels = -pixels
+        
+        script = f"window.scrollBy(0, {pixels})"
+        await self.page.evaluate(script)
+        await self.page.wait_for_timeout(200)
+
+    def _parse_scroll_pixels(self, text: str) -> Optional[int]:
+        """Parse scroll pixels from plan step value."""
+        if text is None:
+            return None
+        try:
+            if isinstance(text, (int, float)):
+                return int(text)
+            text_str = str(text).strip().lower()
+            if text_str in ["up", "down"]:
+                return None  # Will use viewport-based calculation
+            if text_str.endswith("px"):
+                return int(float(text_str[:-2]))
+            if text_str.endswith("%"):
+                value = float(text_str[:-1]) / 100.0
+                return int(value * (self.page.viewport_size["height"] if self.page.viewport_size else 1))
+            return int(text)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return None
 
     async def _run_step_vision_fallback(self, step) -> None:
         """Execute step using vision-based element location (fallback)."""
@@ -325,6 +895,14 @@ class Navigator:
             return f"type({step.selector})"
         if step.action == "submit":
             return f"submit({step.selector})"
+        if step.action == "wait":
+            return "wait"
+        if step.action == "scroll":
+            if step.selector:
+                return f"scroll({step.selector})"
+            if step.role and step.name:
+                return f"scroll({step.role}:{step.name})"
+            return "scroll"
         return step.action
 
     def finalize(self, plan: ExecutionPlan, context: Dict) -> ConstitutionReport:
@@ -454,5 +1032,3 @@ class Navigator:
             adjustments.pop("notes", None)
 
         return recovered, adjustments
-
-

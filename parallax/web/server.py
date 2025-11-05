@@ -34,7 +34,6 @@ from parallax.agents.observer import Observer
 from parallax.observer.detectors import Detectors
 from parallax.agents.archivist import Archivist
 from parallax.llm.openai_provider import OpenAIPlanner
-from parallax.llm.anthropic_provider import AnthropicPlanner
 from parallax.llm.local_provider import LocalPlanner
 from parallax.core.trace import TraceController
 
@@ -60,18 +59,13 @@ def _planner_from_config(cfg: dict):
     provider = os.getenv("PARALLAX_PROVIDER", cfg.get("provider", "auto"))
     if provider == "openai":
         return OpenAIPlanner()
-    if provider == "anthropic":
-        return AnthropicPlanner()
     if provider == "local":
         return LocalPlanner()
-    # auto: prefer OpenAI, then Anthropic, then Local
+    # auto: prefer OpenAI, then Local
     try:
         return OpenAIPlanner()
     except Exception:
-        try:
-            return AnthropicPlanner()
-        except Exception:
-            return LocalPlanner()
+        return LocalPlanner()
 
 
 def _slugify(text: str) -> str:
@@ -239,12 +233,22 @@ async def run_task(request: TaskRequest):
             })
 
             plan = await interpreter.plan(task, plan_context)
+            
+            # Log plan details for debugging
+            log.info(
+                "plan_generated",
+                task=task,
+                steps=len(plan.steps),
+                planner_type=type(planner).__name__,
+                step_details=[f"{s.action}:{s.target or s.selector or s.name or s.role or ''}" for s in plan.steps[:5]]
+            )
 
             await manager.send_progress({
                 "type": "planned",
                 "task_id": task_id,
                 "attempt": attempt_number,
                 "steps": len(plan.steps),
+                "plan_preview": [{"action": s.action, "target": s.target, "name": s.name, "role": s.role} for s in plan.steps[:10]]
             })
 
             async with async_playwright() as p:
@@ -285,6 +289,7 @@ async def run_task(request: TaskRequest):
                     page,
                     observer=observer,
                     default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
+                    scroll_margin_px=navigation_cfg.get("scroll_margin_px", 64),
                     failure_store=failure_store,
                     vision_analyzer=vision_analyzer,
                     task_context=task,

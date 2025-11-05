@@ -228,6 +228,7 @@ async def run_workflow(task: str, start_url: str):
             page,
             observer=observer,
             default_wait_ms=1000,
+            scroll_margin_px=64,
             failure_store=failure_store
         )
         

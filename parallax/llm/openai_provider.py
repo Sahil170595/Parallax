@@ -55,6 +55,76 @@ Task: "Filter database in Notion"
   ]
 }
 
+Task: "Explore all tabs on a website"
+{
+  "steps": [
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "wait", "value": "1s"},
+    {"action": "click", "role": "link", "name": "About"},
+    {"action": "wait", "value": "1s"},
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "click", "role": "link", "name": "Services"},
+    {"action": "wait", "value": "1s"},
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "click", "role": "link", "name": "Contact"},
+    {"action": "wait", "value": "1s"}
+  ]
+}
+
+Task: "Navigate to softlight.com and explore all tabs on that website"
+{
+  "steps": [
+    {"action": "navigate", "target": "https://softlight.com"},
+    {"action": "wait", "value": "2s"},
+    {"action": "click", "role": "link", "name": "We're hiring"},
+    {"action": "wait", "value": "2s"},
+    {"action": "navigate", "target": "https://softlight.com"},
+    {"action": "click", "role": "link", "name": "Join waitlist"},
+    {"action": "wait", "value": "1s"}
+  ]
+}
+
+Task: "Navigate to a website and explore the full website"
+{
+  "steps": [
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "wait", "value": "2s"},
+    {"action": "scroll", "value": "down"},
+    {"action": "wait", "value": "1s"},
+    {"action": "click", "role": "link", "name": "About"},
+    {"action": "wait", "value": "2s"},
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "click", "role": "link", "name": "Services"},
+    {"action": "wait", "value": "2s"},
+    {"action": "navigate", "target": "https://example.com"},
+    {"action": "scroll", "value": "down"},
+    {"action": "wait", "value": "1s"}
+  ]
+}
+
+EXPLORATION STRATEGY:
+When the task contains keywords like "explore", "all tabs", "full website", "navigate through", or "find":
+1. ALWAYS start by navigating to the start URL
+2. Add a wait step (1-2s) after navigation to let the page load
+3. Systematically identify and click on ALL navigation elements:
+   - Main navigation links (header/nav menu)
+   - Tab buttons
+   - Menu items
+   - Primary call-to-action buttons
+   - Important content links (not footer/social links unless explicitly requested)
+4. For each click, navigate back to the start URL before clicking the next element
+5. Include wait steps between actions to allow pages to load
+6. For "full website" or "explore the site", also include scroll actions to discover more content
+7. Prioritize main navigation elements over footer/social links
+
+When exploring, think about what a user would see on screen:
+- Navigation bars at the top
+- Tab buttons
+- Menu dropdowns
+- Primary action buttons
+- Main content links
+
+Generate a comprehensive plan that explores all visible navigation elements systematically.
 Generate a plan for the user task."""
         
         examples = [
