@@ -22,6 +22,8 @@ Parallax detects **non-URL state changes** (modals, toasts, forms, async transit
 
 ## Installation
 
+**New to Parallax?** See the [Quick Start Guide](QUICKSTART.md) for step-by-step installation instructions.
+
 ### What Python version do I need?
 
 Python 3.11 or higher is required.
@@ -33,6 +35,8 @@ pip install -e .
 python -m playwright install --with-deps
 ```
 
+See the [Quick Start Guide](QUICKSTART.md) for detailed instructions.
+
 ### Do I need API keys?
 
 Yes, at least one API key is required for LLM planning:
@@ -41,15 +45,21 @@ Yes, at least one API key is required for LLM planning:
 
 Vision features require one of these API keys as well.
 
+See the [Quick Start Guide](QUICKSTART.md) for API key setup.
+
 ---
 
 ## Usage
+
+**New to Parallax?** See the [Quick Start Guide](QUICKSTART.md) for examples and common workflows.
 
 ### How do I run a workflow?
 
 ```bash
 python -m parallax.runner.cli run "YOUR TASK HERE" --app-name APP_NAME --start-url START_URL
 ```
+
+See the [Quick Start Guide](QUICKSTART.md) for more examples and the [Usage Guide](USAGE.md) for detailed instructions.
 
 ### What are good task descriptions?
 

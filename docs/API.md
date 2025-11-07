@@ -1,5 +1,9 @@
 # API Documentation
 
+Complete API reference for programmatic usage of Parallax.
+
+**New to Parallax?** See the [Quick Start Guide](QUICKSTART.md) for basic usage and examples.
+
 ## Agents
 
 ### Agent A1: Interpreter

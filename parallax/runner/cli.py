@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -15,6 +17,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, skip
 
+from parallax.core.config import ParallaxConfig
 from parallax.core.constitution import ConstitutionViolation, FailureStore
 from parallax.core.logging import configure_logging, get_logger
 from rich.console import Console
@@ -37,14 +40,29 @@ app = typer.Typer()
 log = get_logger("cli")
 console = Console()
 
+# Graceful shutdown handling
+shutdown_event = asyncio.Event()
 
-def _load_config() -> dict:
+def signal_handler(sig: int, frame) -> None:
+    """Handle shutdown signals gracefully."""
+    signal_name = signal.Signals(sig).name if hasattr(signal.Signals, sig) else str(sig)
+    log.info("shutdown_signal_received", signal=signal_name)
+    shutdown_event.set()
+    console.print("\n[yellow]Shutdown signal received. Finishing current task...[/yellow]")
+
+# Register signal handlers
+if sys.platform != "win32":
+    signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+
+def _load_config() -> ParallaxConfig:
     cfg_path = Path("configs/config.yaml")
-    return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return ParallaxConfig.from_yaml(cfg_path)
 
 
-def _planner_from_config(cfg: dict):
-    provider = os.getenv("PARALLAX_PROVIDER", cfg.get("provider", "auto"))
+def _planner_from_config(cfg: ParallaxConfig):
+    provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
         return OpenAIPlanner()
     if provider == "local":
@@ -77,24 +95,29 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
         cfg = _load_config()
         planner = _planner_from_config(cfg)
 
-        datasets_dir = Path(cfg.get("output", {}).get("base_dir", "datasets"))
+        datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
         interpreter = Interpreter(planner, failure_store=failure_store)
         
         # Initialize vision analyzer if enabled
         vision_analyzer = None
-        vision_enabled = cfg.get("vision", {}).get("enabled", False)
+        vision_enabled = cfg.vision.enabled
         if vision_enabled:
             try:
                 from parallax.vision.analyzer import VisionAnalyzer
-                vision_provider = cfg.get("vision", {}).get("provider", "openai")
+                vision_provider = cfg.vision.provider
                 vision_analyzer = VisionAnalyzer(provider=vision_provider)
                 log.info("vision_analyzer_enabled", provider=vision_provider)
             except Exception as e:
-                log.warning("vision_analyzer_failed", error=str(e))
+                log.warning(
+                    "vision_analyzer_failed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    provider=vision_provider,
+                )
 
-        navigation_cfg = cfg.get("navigation", {})
-        heal_value = navigation_cfg.get("self_heal_attempts", 1)
+        navigation_cfg = cfg.navigation
+        heal_value = navigation_cfg.self_heal_attempts
         try:
             heal_attempts = max(0, int(heal_value))
         except (TypeError, ValueError):
@@ -129,13 +152,16 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
             console.print(f"[green]✓[/green] Generated [bold]{len(plan.steps)}[/bold] steps")
 
             async with async_playwright() as p:
-                browser_type = cfg.get("playwright", {}).get("project", "chromium")
-                headless = cfg.get("playwright", {}).get("headless", False)
+                browser_type = cfg.playwright.project
+                headless = cfg.playwright.headless
                 browser = await getattr(p, browser_type).launch(headless=headless)
                 context = await browser.new_context()
                 page = await context.new_page()
 
-                detectors = Detectors(cfg.get("observer", {}), vision_analyzer=vision_analyzer)
+                # Merge observer and capture configs for Detectors
+                detector_config = cfg.observer.model_dump() if hasattr(cfg.observer, 'model_dump') else cfg.observer.dict()
+                detector_config["capture"] = cfg.capture.model_dump() if hasattr(cfg.capture, 'model_dump') else cfg.capture.dict()
+                detectors = Detectors(detector_config, vision_analyzer=vision_analyzer)
                 task_dir = datasets_dir / app_name / attempt_slug
                 task_dir.mkdir(parents=True, exist_ok=True)
                 observer = Observer(
@@ -149,7 +175,7 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                 tracer = TraceController(context)
                 await tracer.start()
 
-                action_budget = action_budget_override or navigation_cfg.get("action_budget", 30)
+                action_budget = action_budget_override or navigation_cfg.action_budget
                 total_steps = max(1, min(len(plan.steps), action_budget))
 
                 with Progress(
@@ -175,8 +201,8 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                     navigator = Navigator(
                         page,
                         observer=observer,
-                        default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
-                        scroll_margin_px=navigation_cfg.get("scroll_margin_px", 64),
+                        default_wait_ms=navigation_cfg.default_wait_ms,
+                        scroll_margin_px=navigation_cfg.scroll_margin_px,
                         failure_store=failure_store,
                         vision_analyzer=vision_analyzer,
                         task_context=task,
@@ -258,6 +284,12 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
 
         last_failure: ConstitutionViolation | None = None
         for attempt in range(total_runs):
+            # Check for shutdown signal
+            if shutdown_event.is_set():
+                console.print("\n[yellow]Shutdown requested. Stopping workflow...[/yellow]")
+                log.info("workflow_cancelled_by_signal", attempt=attempt + 1)
+                return
+            
             attempt_slug = slug if attempt == 0 else f"{slug}-retry-{attempt}"
             try:
                 await _run_attempt(attempt, attempt_slug)
@@ -273,7 +305,7 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                     for failure in exc.failures
                 )
                 if len(failure_history) > 20:
-                    del failure_history[:-20]
+                    failure_history[:] = failure_history[-20:]
                 console.print("\n[red]❌ Navigation validation failed[/red]")
                 console.print("[dim]The workflow did not meet quality requirements.[/dim]\n")
                 

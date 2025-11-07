@@ -1,26 +1,87 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from typing import Any, Dict
 
+try:
+    from aiolimiter import AsyncLimiter
+except ImportError:
+    class AsyncLimiter:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+
+try:
+    from tenacity import (
+        retry,
+        retry_if_exception_type,
+        stop_after_attempt,
+        wait_exponential,
+    )
+except ImportError:
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def stop_after_attempt(*args):
+        pass
+    def wait_exponential(*args, **kwargs):
+        pass
+    def retry_if_exception_type(*args):
+        pass
+
+from parallax.core.exceptions import (
+    LLMAPIError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
+from parallax.core.cost_tracker import CostTracker
+from parallax.core.logging import get_logger
 from parallax.core.schemas import ExecutionPlan, PlanStep
+from parallax.llm.utils import extract_json_from_content
+
+log = get_logger("anthropic")
 
 try:
     import anthropic  # type: ignore
+    from anthropic import RateLimitError, APIError  # type: ignore
 except Exception:  # pragma: no cover
     anthropic = None  # type: ignore
+    RateLimitError = Exception  # type: ignore
+    APIError = Exception  # type: ignore
 
 
 class AnthropicPlanner:
-    def __init__(self, model: str = "claude-3-5-sonnet-latest") -> None:
+    def __init__(
+        self,
+        model: str = "claude-3-5-sonnet-latest",
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        rate_limit_per_minute: int = 50,
+    ) -> None:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is required for AnthropicPlanner")
         if anthropic is None:
             raise RuntimeError("anthropic package not installed")
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.rate_limiter = AsyncLimiter(max_rate=rate_limit_per_minute, time_period=60)
+        self.cost_tracker = CostTracker()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((LLMTimeoutError, LLMRateLimitError)),
+        reraise=True,
+    )
     async def generate_plan(self, task: str, context: Dict) -> ExecutionPlan:
         system_prompt = """You are a web automation planner. Generate a JSON plan with ordered steps.
 
@@ -127,26 +188,52 @@ When exploring, think about what a user would see on screen:
 Generate a comprehensive plan that explores all visible navigation elements systematically.
 Generate a plan for the user task."""
         
-        msg = await self.client.messages.create(
-            model=self.model,
-            max_tokens=1200,
-            temperature=0.2,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Task: {task}\n\nGenerate a JSON plan with a 'steps' array."
-                }
-            ],
-        )
-        content = "".join(part.text for part in msg.content if getattr(part, "text", None))
-        json_loader = context.get("json_loader", lambda x: __import__("json").loads(x))
-        # Extract JSON from markdown code blocks if present
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-        data = json_loader(content)
+        async with self.rate_limiter:
+            try:
+                msg = await asyncio.wait_for(
+                    self.client.messages.create(
+                        model=self.model,
+                        max_tokens=1200,
+                        temperature=0.2,
+                        system=system_prompt,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"Task: {task}\n\nGenerate a JSON plan with a 'steps' array."
+                            }
+                        ],
+                    ),
+                    timeout=self.timeout,
+                )
+            except asyncio.TimeoutError:
+                log.error("llm_timeout", provider="anthropic", timeout=self.timeout)
+                raise LLMTimeoutError("anthropic", self.timeout) from None
+            except RateLimitError as e:
+                retry_after = getattr(e, "retry_after", None)
+                log.warning("rate_limit_exceeded", provider="anthropic", retry_after=retry_after)
+                raise LLMRateLimitError("anthropic", retry_after) from e
+            except APIError as e:
+                status_code = getattr(e, "status_code", None)
+                log.error("api_error", provider="anthropic", status_code=status_code, error=str(e))
+                raise LLMAPIError("anthropic", status_code, str(e), retryable=status_code and status_code >= 500) from e
+        
+        # Extract token usage and track cost
+        usage = getattr(msg, 'usage', None)
+        input_tokens = usage.input_tokens if usage else 0
+        output_tokens = usage.output_tokens if usage else 0
+        self.cost_tracker.track_llm_call("anthropic", self.model, input_tokens, output_tokens)
+        
+        content = "".join(part.text for part in msg.content if hasattr(part, "text") and part.text)
+        try:
+            data = extract_json_from_content(content)
+        except (ValueError, json.JSONDecodeError) as e:
+            log.error("json_extraction_failed", error=str(e), content_preview=content[:200])
+            raise LLMAPIError("anthropic", None, f"Failed to extract JSON from LLM response: {e}", retryable=False) from e
+        
+        json_loader = context.get("json_loader", lambda x: json.loads(x))
+        # Use extracted data or try json_loader as fallback
+        if not isinstance(data, dict):
+            data = json_loader(content) if content else {}
         steps = [PlanStep(**s) for s in data.get("steps", [])]
         return ExecutionPlan(steps=steps)
 

@@ -84,22 +84,20 @@ def _discover_workflows(base_dir: Path) -> List[Dict]:
 def _get_stats_from_db(db_path: Path) -> Dict:
     """Get statistics from SQLite database."""
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        
-        # Count states
-        cursor.execute("SELECT COUNT(*) FROM states")
-        states_count = cursor.fetchone()[0]
-        
-        # Count screenshots
-        cursor.execute("SELECT COUNT(*) FROM screenshots")
-        screenshots_count = cursor.fetchone()[0]
-        
-        # Get unique URLs
-        cursor.execute("SELECT COUNT(DISTINCT url) FROM states")
-        unique_urls = cursor.fetchone()[0]
-        
-        conn.close()
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
+            
+            # Count states
+            cursor.execute("SELECT COUNT(*) FROM states")
+            states_count = cursor.fetchone()[0]
+            
+            # Count screenshots
+            cursor.execute("SELECT COUNT(*) FROM screenshots")
+            screenshots_count = cursor.fetchone()[0]
+            
+            # Get unique URLs
+            cursor.execute("SELECT COUNT(DISTINCT url) FROM states")
+            unique_urls = cursor.fetchone()[0]
         
         return {
             "states_count": states_count,

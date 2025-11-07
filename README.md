@@ -16,8 +16,14 @@ Parallax executes natural-language web tasks end-to-end using Playwright and a p
 - 🧠 **Vision-Based Enhancements:** Optional vision LLM support for completion detection and element location
 - 🏛️ **Constitution System:** Quality gates ensure reliable outputs
 - 📊 **Rich Outputs:** JSONL, SQLite, HTML reports with timeline
+- 🔄 **Production-Ready:** Retry logic, rate limiting, timeout handling, error recovery
+- 💰 **Cost Tracking:** Track LLM API costs per provider and model
+- 🏥 **Health Checks:** Built-in health monitoring and dependency checks
+- 🔒 **Security:** Input validation, HTML escaping, secure resource management
 
 ## Quickstart
+
+Get started in 3 steps:
 
 ### 1. Installation
 
@@ -40,17 +46,21 @@ Create a `.env` file:
 # OpenAI (for LLM planning and vision)
 OPENAI_API_KEY=sk-proj-...
 
-# Anthropic (alternative LLM provider)
+# OR Anthropic (alternative LLM provider)
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ### 3. Run Your First Workflow
 
 ```bash
-python -m parallax.runner.cli run "Navigate to example.com and show the page"
+python -m parallax.runner.cli run "Navigate to example.com and show the page" \
+  --app-name demo \
+  --start-url https://example.com
 ```
 
 Output will be saved to `datasets/demo/navigate-to-example-com-and-show-the-page/`.
+
+**📖 For detailed instructions, see the [Quick Start Guide](docs/QUICKSTART.md)**
 
 ## Usage
 
@@ -108,6 +118,36 @@ Open `report.html` in your browser to see:
 - Metadata (modals, toasts, forms)
 - Action descriptions
 
+## Production-Ready Features
+
+Parallax includes enterprise-grade features for production deployments:
+
+### Reliability & Resilience
+- **Retry Logic:** Automatic retries with exponential backoff for transient failures
+- **Rate Limiting:** Built-in rate limiting for LLM APIs to prevent quota exhaustion
+- **Timeout Handling:** Comprehensive timeout management at multiple levels
+- **Error Recovery:** Self-healing workflows with configurable retry attempts
+- **Circuit Breaker Pattern:** Automatic failure detection and recovery
+
+### Observability & Monitoring
+- **Health Checks:** `/health` endpoint for dependency monitoring
+- **Cost Tracking:** Track LLM API costs per provider and model
+- **Structured Logging:** Comprehensive logging with context and correlation IDs
+- **Metrics:** Prometheus metrics for workflow success, failures, and performance
+
+### Security & Validation
+- **Input Validation:** Pydantic-based validation for all API inputs
+- **Configuration Validation:** Schema validation with clear error messages
+- **HTML Escaping:** XSS protection in generated reports
+- **Resource Management:** Proper cleanup of browser resources and connections
+
+### Developer Experience
+- **Type Safety:** Comprehensive type hints throughout the codebase
+- **Cancellation Support:** Cancel long-running workflows gracefully
+- **Error Hierarchy:** Structured exception handling with context
+- **Test Suite:** Comprehensive integration tests for complex workflows
+
+
 ## Architecture
 
 Parallax uses a four-agent architecture:
@@ -121,10 +161,11 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for details.
 
 ## Documentation
 
-- **[API Documentation](docs/API.md)** - Complete API reference
+- **[Quick Start Guide](docs/QUICKSTART.md)** - Get started in 5 minutes ⭐
 - **[Usage Guide](docs/USAGE.md)** - Detailed usage instructions
-- **[Architecture](docs/ARCHITECTURE.md)** - System design and architecture
+- **[API Documentation](docs/API.md)** - Complete API reference
 - **[Configuration Reference](docs/CONFIGURATION.md)** - Complete configuration options
+- **[Architecture](docs/ARCHITECTURE.md)** - System design and architecture
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
 - **[Contributing](CONTRIBUTING.md)** - Guidelines for contributing
 

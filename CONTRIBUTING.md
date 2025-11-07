@@ -4,6 +4,8 @@ Thank you for your interest in contributing to Parallax! This document provides 
 
 ## Getting Started
 
+**New to Parallax?** See the [Quick Start Guide](docs/QUICKSTART.md) for installation and setup.
+
 ### 1. Fork and Clone
 
 ```bash

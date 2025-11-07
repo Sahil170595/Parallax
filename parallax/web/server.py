@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,9 +16,9 @@ import yaml
 if sys.platform == "win32" and sys.version_info >= (3, 13):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, HttpUrl, validator
 from playwright.async_api import async_playwright
 
 try:
@@ -25,6 +27,7 @@ try:
 except ImportError:
     pass
 
+from parallax.core.config import ParallaxConfig
 from parallax.core.constitution import ConstitutionViolation, FailureStore
 from parallax.core.logging import configure_logging, get_logger
 from parallax.core.schemas import ExecutionPlan
@@ -42,21 +45,55 @@ app = FastAPI(title="Parallax Web UI")
 log = get_logger("web")
 configure_logging()
 
+# Graceful shutdown handling
+shutdown_event = asyncio.Event()
+active_tasks: set[asyncio.Task] = set()
+
+def signal_handler(sig: int, frame) -> None:
+    """Handle shutdown signals gracefully."""
+    signal_name = signal.Signals(sig).name if hasattr(signal.Signals, sig) else str(sig)
+    log.info("shutdown_signal_received", signal=signal_name)
+    shutdown_event.set()
+
+# Register signal handlers (only on non-Windows platforms)
+if sys.platform != "win32":
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+else:
+    # Windows doesn't support SIGTERM, only SIGINT
+    signal.signal(signal.SIGINT, signal_handler)
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize on startup."""
+    log.info("server_starting")
+
+@app.on_event("shutdown")
+async def shutdown_event_handler():
+    """Cleanup on shutdown."""
+    log.info("server_shutting_down", active_tasks=len(active_tasks))
+    # Cancel all active tasks
+    for task in active_tasks:
+        if not task.done():
+            task.cancel()
+    # Wait for tasks to complete (with timeout)
+    if active_tasks:
+        await asyncio.wait(active_tasks, timeout=5.0, return_when=asyncio.ALL_COMPLETED)
+    log.info("server_shutdown_complete")
+
 # Configuration
 CONFIG_PATH = Path("configs/config.yaml")
 DATASETS_DIR = Path("datasets")
 
 
-def _load_config() -> dict:
-    """Load configuration from YAML file."""
-    if not CONFIG_PATH.exists():
-        return {}
-    return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+def _load_config() -> ParallaxConfig:
+    """Load and validate configuration from YAML file."""
+    return ParallaxConfig.from_yaml(CONFIG_PATH)
 
 
-def _planner_from_config(cfg: dict):
+def _planner_from_config(cfg: ParallaxConfig):
     """Get planner from config."""
-    provider = os.getenv("PARALLAX_PROVIDER", cfg.get("provider", "auto"))
+    provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
         return OpenAIPlanner()
     if provider == "local":
@@ -91,21 +128,109 @@ class ConnectionManager:
     
     async def send_progress(self, message: dict):
         """Send progress update to all connected clients."""
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("websocket_send_failed", error=str(e), error_type=type(e).__name__)
+                disconnected.append(connection)
+        # Remove disconnected connections
+        for conn in disconnected:
+            self.disconnect(conn)
 
 
 manager = ConnectionManager()
 
 
 class TaskRequest(BaseModel):
-    """Task request model."""
-    task: str
-    app_name: str = "demo"
-    start_url: str = "https://example.com"
+    """Task request model with validation."""
+    task: str = Field(..., min_length=1, max_length=1000, description="Natural language task description")
+    app_name: str = Field(default="demo", pattern=r'^[a-z0-9-_]+$', description="Application name (alphanumeric, dashes, underscores)")
+    start_url: HttpUrl = Field(..., description="Starting URL for the workflow")
+    
+    @validator('task')
+    def validate_task(cls, v):
+        """Validate task is not empty after stripping."""
+        if not v.strip():
+            raise ValueError("Task cannot be empty")
+        return v.strip()
+    
+    @validator('app_name')
+    def validate_app_name(cls, v):
+        """Validate app name format."""
+        if not v or len(v) > 100:
+            raise ValueError("App name must be 1-100 characters")
+        return v.lower()
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint with dependency status."""
+    checks = {
+        "status": "healthy",
+        "checks": {}
+    }
+    
+    # Check Playwright availability
+    try:
+        from playwright.async_api import async_playwright
+        checks["checks"]["playwright"] = True
+    except Exception as e:
+        checks["checks"]["playwright"] = False
+        checks["checks"]["playwright_error"] = str(e)
+    
+    # Check LLM providers
+    checks["checks"]["llm_providers"] = {}
+    
+    # Check OpenAI
+    try:
+        if os.getenv("OPENAI_API_KEY"):
+            from parallax.llm.openai_provider import OpenAIPlanner
+            planner = OpenAIPlanner()
+            checks["checks"]["llm_providers"]["openai"] = True
+        else:
+            checks["checks"]["llm_providers"]["openai"] = "not_configured"
+    except Exception as e:
+        checks["checks"]["llm_providers"]["openai"] = False
+        checks["checks"]["llm_providers"]["openai_error"] = str(e)
+    
+    # Check Anthropic
+    try:
+        if os.getenv("ANTHROPIC_API_KEY"):
+            from parallax.llm.anthropic_provider import AnthropicPlanner
+            planner = AnthropicPlanner()
+            checks["checks"]["llm_providers"]["anthropic"] = True
+        else:
+            checks["checks"]["llm_providers"]["anthropic"] = "not_configured"
+    except Exception as e:
+        checks["checks"]["llm_providers"]["anthropic"] = False
+        checks["checks"]["llm_providers"]["anthropic_error"] = str(e)
+    
+    # Check disk space
+    try:
+        total, used, free = shutil.disk_usage(DATASETS_DIR if DATASETS_DIR.exists() else Path("."))
+        checks["checks"]["disk_space"] = {
+            "total_gb": round(total / (1024**3), 2),
+            "used_gb": round(used / (1024**3), 2),
+            "free_gb": round(free / (1024**3), 2),
+            "free_percent": round((free / total) * 100, 2)
+        }
+        if free / total < 0.1:  # Less than 10% free
+            checks["status"] = "degraded"
+    except Exception as e:
+        checks["checks"]["disk_space"] = False
+        checks["checks"]["disk_space_error"] = str(e)
+    
+    # Determine overall status
+    all_healthy = all(
+        v is True or (isinstance(v, dict) and v.get("free_percent", 100) > 5)
+        for v in checks["checks"].values()
+        if v is not False
+    )
+    
+    status_code = 200 if checks["status"] == "healthy" else (503 if checks["status"] == "degraded" else 200)
+    return JSONResponse(checks, status_code=status_code)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -176,23 +301,23 @@ async def run_task(request: TaskRequest):
         cfg = _load_config()
         planner = _planner_from_config(cfg)
         
-        datasets_dir = Path(cfg.get("output", {}).get("base_dir", "datasets"))
+        datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
         interpreter = Interpreter(planner, failure_store=failure_store)
 
         vision_analyzer = None
-        vision_enabled = cfg.get("vision", {}).get("enabled", False)
+        vision_enabled = cfg.vision.enabled
         if vision_enabled:
             try:
                 from parallax.vision.analyzer import VisionAnalyzer
 
-                vision_provider = cfg.get("vision", {}).get("provider", "openai")
+                vision_provider = cfg.vision.provider
                 vision_analyzer = VisionAnalyzer(provider=vision_provider)
             except Exception as e:
                 log.warning("vision_analyzer_failed", error=str(e))
 
-        navigation_cfg = cfg.get("navigation", {})
-        heal_value = navigation_cfg.get("self_heal_attempts", 1)
+        navigation_cfg = cfg.navigation
+        heal_value = navigation_cfg.self_heal_attempts
         try:
             heal_attempts = max(0, int(heal_value))
         except (TypeError, ValueError):
@@ -252,125 +377,147 @@ async def run_task(request: TaskRequest):
             })
 
             async with async_playwright() as p:
-                browser_type = cfg.get("playwright", {}).get("project", "chromium")
-                headless = cfg.get("playwright", {}).get("headless", True)
-                browser = await getattr(p, browser_type).launch(headless=headless)
-                context = await browser.new_context()
-                page = await context.new_page()
-
-                detectors = Detectors(cfg.get("observer", {}), vision_analyzer=vision_analyzer)
-                task_dir = datasets_dir / app_name / attempt_slug
-                task_dir.mkdir(parents=True, exist_ok=True)
-                observer = Observer(
-                    page,
-                    detectors,
-                    save_dir=task_dir,
-                    failure_store=failure_store,
-                    task_context=task,
-                )
-
-                tracer = TraceController(context)
-                await tracer.start()
-
-                action_budget = action_budget_override or navigation_cfg.get("action_budget", 30)
-                total_steps = max(1, min(len(plan.steps), action_budget))
-
-                async def progress_callback(idx: int, total: int, step: Any) -> None:
-                    await manager.send_progress({
-                        "type": "progress",
-                        "task_id": task_id,
-                        "attempt": attempt_number,
-                        "current": min(idx, total),
-                        "total": max(total, 1),
-                        "message": f"{step.action}",
-                    })
-
-                navigator = Navigator(
-                    page,
-                    observer=observer,
-                    default_wait_ms=navigation_cfg.get("default_wait_ms", 1000),
-                    scroll_margin_px=navigation_cfg.get("scroll_margin_px", 64),
-                    failure_store=failure_store,
-                    vision_analyzer=vision_analyzer,
-                    task_context=task,
-                    progress_callback=progress_callback,
-                )
-
-                await manager.send_progress({
-                    "type": "executing",
-                    "task_id": task_id,
-                    "attempt": attempt_number,
-                    "message": "Executing workflow...",
-                })
-
-                await navigator.execute(plan, action_budget=action_budget)
-
-                nav_context = {
-                    "page": page,
-                    "action_budget": action_budget,
-                    "action_count": navigator.action_count,
-                    "start_url": start_url_current,
-                }
-                trace_zip_path = task_dir / "trace.zip"
-
+                browser_type = cfg.playwright.project
+                headless = cfg.playwright.headless
+                browser = None
+                context = None
+                tracer = None
+                trace_zip_path = None
                 try:
-                    nav_report = navigator.finalize(plan, nav_context)
-                except ConstitutionViolation as exc:
-                    recovered, adjustments = await navigator.heal(plan, nav_context, exc.failures)
-                    exc.recovery = {"recovered": recovered, "adjustments": adjustments}
+                    browser = await getattr(p, browser_type).launch(headless=headless)
+                    context = await browser.new_context()
+                    page = await context.new_page()
 
-                    await manager.send_progress({
-                        "type": "validation_failed",
-                        "task_id": task_id,
-                        "attempt": attempt_number,
-                        "failures": [
-                            {
-                                "rule": failure.rule_name,
-                                "reason": failure.reason,
-                            }
-                            for failure in exc.failures
-                        ],
-                    })
+                    # Merge observer and capture configs for Detectors
+                    detector_config = cfg.observer.model_dump() if hasattr(cfg.observer, 'model_dump') else cfg.observer.dict()
+                    detector_config["capture"] = cfg.capture.model_dump() if hasattr(cfg.capture, 'model_dump') else cfg.capture.dict()
+                    detectors = Detectors(detector_config, vision_analyzer=vision_analyzer)
+                    task_dir = datasets_dir / app_name / attempt_slug
+                    task_dir.mkdir(parents=True, exist_ok=True)
+                    observer = Observer(
+                        page,
+                        detectors,
+                        save_dir=task_dir,
+                        failure_store=failure_store,
+                        task_context=task,
+                    )
 
-                    await tracer.stop(trace_zip_path)
-                    await context.close()
-                    await browser.close()
-                    raise
+                    tracer = TraceController(context)
+                    await tracer.start()
 
-                if nav_report.warnings:
-                    for warning in nav_report.warnings:
+                    action_budget = action_budget_override or navigation_cfg.action_budget
+                    total_steps = max(1, min(len(plan.steps), action_budget))
+
+                    async def progress_callback(idx: int, total: int, step: Any) -> None:
                         await manager.send_progress({
-                            "type": "warning",
+                            "type": "progress",
                             "task_id": task_id,
                             "attempt": attempt_number,
-                            "message": f"{warning.rule_name}: {warning.reason}",
+                            "current": min(idx, total),
+                            "total": max(total, 1),
+                            "message": f"{step.action}",
                         })
 
-                await manager.send_progress({
-                    "type": "saving",
-                    "task_id": task_id,
-                    "attempt": attempt_number,
-                    "message": "Saving results...",
-                })
+                    navigator = Navigator(
+                        page,
+                        observer=observer,
+                        default_wait_ms=navigation_cfg.default_wait_ms,
+                        scroll_margin_px=navigation_cfg.scroll_margin_px,
+                        failure_store=failure_store,
+                        vision_analyzer=vision_analyzer,
+                        task_context=task,
+                        progress_callback=progress_callback,
+                    )
 
-                await tracer.stop(trace_zip_path)
+                    await manager.send_progress({
+                        "type": "executing",
+                        "task_id": task_id,
+                        "attempt": attempt_number,
+                        "message": "Executing workflow...",
+                    })
 
-                archivist = Archivist(datasets_dir, failure_store=failure_store)
-                root = archivist.write_states(app_name, attempt_slug, observer.states, trace_zip="trace.zip")
+                    await navigator.execute(plan, action_budget=action_budget)
 
-                await context.close()
-                await browser.close()
+                    nav_context = {
+                        "page": page,
+                        "action_budget": action_budget,
+                        "action_count": navigator.action_count,
+                        "start_url": start_url_current,
+                    }
+                    trace_zip_path = task_dir / "trace.zip"
 
-                result = {
-                    "success": True,
-                    "task_id": task_id,
-                    "path": str(root),
-                    "report_url": f"/api/reports/{app_name}/{attempt_slug}",
-                    "states": len(observer.states),
-                }
+                    try:
+                        nav_report = navigator.finalize(plan, nav_context)
+                    except ConstitutionViolation as exc:
+                        recovered, adjustments = await navigator.heal(plan, nav_context, exc.failures)
+                        exc.recovery = {"recovered": recovered, "adjustments": adjustments}
 
-                await manager.send_progress({"type": "completed", **result})
-                return result
+                        await manager.send_progress({
+                            "type": "validation_failed",
+                            "task_id": task_id,
+                            "attempt": attempt_number,
+                            "failures": [
+                                {
+                                    "rule": failure.rule_name,
+                                    "reason": failure.reason,
+                                }
+                                for failure in exc.failures
+                            ],
+                        })
+
+                        if tracer and trace_zip_path:
+                            await tracer.stop(trace_zip_path)
+                        raise
+
+                    if nav_report.warnings:
+                        for warning in nav_report.warnings:
+                            await manager.send_progress({
+                                "type": "warning",
+                                "task_id": task_id,
+                                "attempt": attempt_number,
+                                "message": f"{warning.rule_name}: {warning.reason}",
+                            })
+
+                    await manager.send_progress({
+                        "type": "saving",
+                        "task_id": task_id,
+                        "attempt": attempt_number,
+                        "message": "Saving results...",
+                    })
+
+                    if tracer and trace_zip_path:
+                        await tracer.stop(trace_zip_path)
+
+                    archivist = Archivist(datasets_dir, failure_store=failure_store)
+                    root = archivist.write_states(app_name, attempt_slug, observer.states, trace_zip="trace.zip")
+
+                    result = {
+                        "success": True,
+                        "task_id": task_id,
+                        "path": str(root),
+                        "report_url": f"/api/reports/{app_name}/{attempt_slug}",
+                        "states": len(observer.states),
+                    }
+
+                    await manager.send_progress({"type": "completed", **result})
+                    return result
+                finally:
+                    # Ensure cleanup happens even if exceptions occur
+                    if tracer is not None and trace_zip_path is not None:
+                        try:
+                            await tracer.stop(trace_zip_path)
+                        except Exception as e:
+                            log.warning("tracer_cleanup_failed", error=str(e), error_type=type(e).__name__)
+                    if context is not None:
+                        try:
+                            await context.close()
+                        except Exception as e:
+                            log.warning("context_cleanup_failed", error=str(e), error_type=type(e).__name__)
+                    if browser is not None:
+                        try:
+                            await browser.close()
+                        except Exception as e:
+                            log.warning("browser_cleanup_failed", error=str(e), error_type=type(e).__name__)
 
         last_failure: ConstitutionViolation | None = None
         for attempt in range(total_runs):
@@ -388,7 +535,7 @@ async def run_task(request: TaskRequest):
                     for failure in exc.failures
                 )
                 if len(failure_history) > 20:
-                    del failure_history[:-20]
+                    failure_history[:] = failure_history[-20:]
 
                 recovery_info = getattr(exc, "recovery", {})
                 adjustments = recovery_info.get("adjustments") or {}
@@ -437,13 +584,30 @@ async def run_task(request: TaskRequest):
 
         raise HTTPException(status_code=500, detail="Workflow did not complete")
 
-    except Exception as e:
+    except (ConstitutionViolation, RuntimeError, ValueError) as e:
         await manager.send_progress({
             "type": "error",
             "task_id": task_id,
             "message": f"Workflow failed: {str(e)}",
         })
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        await manager.send_progress({
+            "type": "error",
+            "task_id": task_id,
+            "message": f"Unexpected error: {error_msg}",
+        })
+        log.exception(
+            "unexpected_error_in_run_task",
+            error=error_msg,
+            error_type=error_type,
+            task=task,
+            app_name=app_name,
+            start_url=str(start_url),
+        )
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {error_type}")
 
 
 @app.websocket("/ws")

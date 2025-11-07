@@ -82,8 +82,16 @@ class Archivist:
         self.store.write_sqlite(root, states_list, app, task_slug)
         
         # Write reports
-        write_markdown_report(root, states_list)
-        write_html_report(root, states_list, trace_zip)
+        try:
+            write_markdown_report(root, states_list)
+        except Exception as e:
+            log.error("markdown_report_failed", error=str(e), error_type=type(e).__name__, app=app, task_slug=task_slug)
+        
+        try:
+            write_html_report(root, states_list, trace_zip)
+        except Exception as e:
+            log.error("html_report_failed", error=str(e), error_type=type(e).__name__, app=app, task_slug=task_slug, states_count=len(states_list))
+            raise  # Re-raise to ensure we know about report failures
         
         # Validate dataset creation against constitution
         validation_context = {

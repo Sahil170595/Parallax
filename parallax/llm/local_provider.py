@@ -1,17 +1,65 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from typing import Dict
+from typing import Any, Dict, Optional
 
+try:
+    from aiolimiter import AsyncLimiter
+except ImportError:
+    class AsyncLimiter:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+
+try:
+    from tenacity import (
+        retry,
+        retry_if_exception_type,
+        stop_after_attempt,
+        wait_exponential,
+    )
+except ImportError:
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def stop_after_attempt(*args):
+        pass
+    def wait_exponential(*args, **kwargs):
+        pass
+    def retry_if_exception_type(*args):
+        pass
+
+from parallax.core.exceptions import LLMAPIError, LLMTimeoutError
+from parallax.core.cost_tracker import CostTracker
+from parallax.core.logging import get_logger
 from parallax.core.schemas import ExecutionPlan, PlanStep
+from parallax.llm.utils import extract_json_from_content
+
+log = get_logger("local")
 
 
 class LocalPlanner:
-    def __init__(self, model: str | None = None, host: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        host: str | None = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        rate_limit_per_minute: int = 30,
+    ) -> None:
         self.model = model or os.getenv("LOCAL_MODEL", "llama3.1:8b")
         self.host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self._client = None
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.rate_limiter = AsyncLimiter(max_rate=rate_limit_per_minute, time_period=60)
+        self._client: Optional[Any] = None
+        self.cost_tracker = CostTracker()
 
     async def _get_client(self):
         if self._client is None:
@@ -21,7 +69,31 @@ class LocalPlanner:
             except ImportError:
                 raise RuntimeError("httpx required for LocalPlanner (pip install httpx)")
         return self._client
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - cleanup resources."""
+        await self.close()
+    
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            finally:
+                self._client = None
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((LLMTimeoutError, ConnectionError)),
+        reraise=True,
+    )
     async def generate_plan(self, task: str, context: Dict) -> ExecutionPlan:
         client = await self._get_client()
         start_url = context.get("start_url", "https://example.com")
@@ -111,33 +183,49 @@ When exploring, think about what a user would see on screen:
 Generate a comprehensive plan that explores all visible navigation elements systematically.
 Return JSON with "steps" array: {{"steps": [...]}}"""
         
-        try:
-            resp = await client.post(
-                "/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False},
-            )
-            resp.raise_for_status()
-            content = resp.json().get("response", "")
-            # Extract JSON from markdown code blocks if present
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            # Try to find JSON object
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                content = content[start:end]
-            data = json.loads(content)
-            steps = [PlanStep(**s) for s in data.get("steps", [])]
-            if not steps:
-                # Fallback: simple navigate
-                steps = [PlanStep(action="navigate", target=context.get("start_url", "https://example.com"))]
-            return ExecutionPlan(steps=steps)
-        except Exception as e:
-            # Fallback: minimal plan
-            return ExecutionPlan(
-                steps=[PlanStep(action="navigate", target=context.get("start_url", "https://example.com"))]
-            )
+        async with self.rate_limiter:
+            try:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "/api/generate",
+                        json={"model": self.model, "prompt": prompt, "stream": False},
+                    ),
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                response_data = resp.json()
+                content = response_data.get("response", "")
+                
+                # Extract token usage from Ollama response (if available)
+                prompt_eval_count = response_data.get("prompt_eval_count", 0)
+                eval_count = response_data.get("eval_count", 0)
+                self.cost_tracker.track_llm_call("local", self.model, prompt_eval_count, eval_count)
+                
+                try:
+                    data = extract_json_from_content(content)
+                except (ValueError, json.JSONDecodeError) as e:
+                    log.warning("json_extraction_failed", error=str(e), content_preview=content[:200])
+                    # Fallback: minimal plan
+                    return ExecutionPlan(
+                        steps=[PlanStep(action="navigate", target=context.get("start_url", "https://example.com"))]
+                    )
+                steps = [PlanStep(**s) for s in data.get("steps", [])]
+                if not steps:
+                    # Fallback: simple navigate
+                    steps = [PlanStep(action="navigate", target=context.get("start_url", "https://example.com"))]
+                return ExecutionPlan(steps=steps)
+            except asyncio.TimeoutError:
+                log.error("llm_timeout", provider="local", timeout=self.timeout)
+                raise LLMTimeoutError("local", self.timeout) from None
+            except Exception as e:
+                log.error("local_planner_failed", error=str(e), error_type=type(e).__name__)
+                # For local provider, we're more lenient - return fallback plan
+                # but still log the error
+                if isinstance(e, ConnectionError):
+                    raise LLMAPIError("local", None, f"Connection error: {e}", retryable=True) from e
+                # Fallback: minimal plan
+                return ExecutionPlan(
+                    steps=[PlanStep(action="navigate", target=context.get("start_url", "https://example.com"))]
+                )
 
 

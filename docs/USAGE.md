@@ -2,41 +2,9 @@
 
 ## Quick Start
 
-### 1. Installation
+**New to Parallax?** Start with the [Quick Start Guide](QUICKSTART.md) for a step-by-step introduction.
 
-```bash
-# Install Python 3.11+
-python --version  # Should be 3.11+
-
-# Install dependencies
-pip install -e .
-
-# Install Playwright browsers
-python -m playwright install --with-deps
-```
-
-### 2. Configuration
-
-Create a `.env` file in the project root:
-
-```bash
-# OpenAI (for LLM planning and vision)
-OPENAI_API_KEY=sk-proj-...
-
-# Anthropic (alternative LLM provider)
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Optional: Vision features
-# Set OPENAI_API_KEY or ANTHROPIC_API_KEY for vision features
-```
-
-### 3. Run Your First Workflow
-
-```bash
-python -m parallax.runner.cli run "Navigate to example.com and show the page"
-```
-
-Output will be saved to `datasets/demo/navigate-to-example-com-and-show-the-page/`.
+This guide covers detailed usage, advanced features, and troubleshooting.
 
 ---
 

@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 import re
 import unicodedata
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
+
+from playwright.async_api import Page
+
+if TYPE_CHECKING:
+    from parallax.agents.observer import Observer
 
 from parallax.agents.constitutions import NAVIGATOR_CONSTITUTION
 from parallax.core.constitution import (
@@ -48,6 +53,12 @@ class Navigator:
         ...     await navigator.execute(plan, action_budget=30)
     """
     
+    # Constants for confidence thresholds and retry logic
+    VISION_COMPLETION_CONFIDENCE_THRESHOLD = 0.7
+    VISION_ELEMENT_CONFIDENCE_THRESHOLD = 0.7
+    CLICK_RETRY_BASE_WAIT_MS = 500
+    TYPE_RETRY_BASE_WAIT_MS = 500
+    
     _SMART_TO_ASCII_TABLE = str.maketrans(
         "\u2018\u2019\u201a\u201c\u201d\u201e\u2013\u2014\u2011\u00a0",
         chr(39)*4 + chr(34)*3 + chr(45)*2 + chr(32),
@@ -59,12 +70,12 @@ class Navigator:
 
     def __init__(
         self,
-        page,
-        observer=None,
+        page: Page,
+        observer: Optional[Observer] = None,
         default_wait_ms: int = 1000,
         scroll_margin_px: int = 64,
         failure_store: Optional[FailureStore] = None,
-        vision_analyzer=None,
+        vision_analyzer: Optional[Any] = None,
         task_context: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, Any], Awaitable[None]]] = None,
     ) -> None:
@@ -83,7 +94,12 @@ class Navigator:
         except (TypeError, ValueError):
             self.scroll_margin_px = 64
 
-    async def execute(self, plan: ExecutionPlan, action_budget: int = 30) -> None:
+    async def execute(
+        self,
+        plan: ExecutionPlan,
+        action_budget: int = 30,
+        cancellation_token: Optional[asyncio.CancelledError] = None,
+    ) -> None:
         """
         Execute an execution plan in the browser.
         
@@ -108,17 +124,30 @@ class Navigator:
         total_steps = len(steps) or 1
 
         for idx, step in enumerate(steps):
+            # Check for cancellation
+            if cancellation_token:
+                try:
+                    cancellation_token.check_cancelled()
+                except AttributeError:
+                    # If cancellation_token doesn't have check_cancelled, check manually
+                    if hasattr(cancellation_token, 'is_cancelled') and cancellation_token.is_cancelled():
+                        log.info("workflow_cancelled", steps_completed=idx, total_steps=total_steps)
+                        raise asyncio.CancelledError("Workflow cancelled by user")
+            
             if self.action_count >= action_budget:
                 log.warning("action_budget_exceeded", budget=action_budget)
                 break
 
             if self.progress_callback:
                 try:
-                    progress_result = self.progress_callback(idx + 1, total_steps, step)
+                    # Ensure progress values are valid: clamp idx to [0, total_steps-1]
+                    safe_idx = min(max(0, idx), max(0, total_steps - 1))
+                    safe_total = max(1, total_steps)
+                    progress_result = self.progress_callback(safe_idx + 1, safe_total, step)
                     if asyncio.iscoroutine(progress_result):
                         await progress_result
                 except Exception as exc:
-                    log.warning("navigator_progress_callback_failed", error=str(exc))
+                    log.warning("navigator_progress_callback_failed", error=str(exc), error_type=type(exc).__name__)
             
             # Check for completion using vision analysis
             if self.vision_analyzer and self._workflow_states:
@@ -132,7 +161,7 @@ class Navigator:
                     
                     if completion_analysis.get("is_complete", False):
                         confidence = completion_analysis.get("confidence", 0.0)
-                        if confidence > 0.7:  # High confidence threshold
+                        if confidence > Navigator.VISION_COMPLETION_CONFIDENCE_THRESHOLD:
                             log.info(
                                 "workflow_complete_vision",
                                 confidence=confidence,
@@ -149,7 +178,7 @@ class Navigator:
                     action_desc = self._describe_action(step)
                     state = await self.observer.observe(action_desc)
                     if state:
-                        self._workflow_states.append(state.__dict__)
+                        self._workflow_states.append(state)
             except Exception as e:
                 log.error("step_failed", step=step.action, error=str(e), step_details={
                     "action": step.action,
@@ -166,7 +195,7 @@ class Navigator:
                     try:
                         state = await self.observer.observe(action_desc)
                         if state:
-                            self._workflow_states.append(state.__dict__)
+                            self._workflow_states.append(state)
                     except Exception:
                         pass  # If state capture also fails, continue
                 
@@ -243,8 +272,10 @@ class Navigator:
                                 await locator.click(timeout=5000)
                             new_page = await new_page_info.value
                             await new_page.wait_for_load_state("networkidle")
-                            # Switch to the new page
+                            # Switch to the new page and update observer reference
                             self.page = new_page
+                            if self.observer is not None:
+                                self.observer.page = new_page
                         elif href and (href.startswith("http") or href.startswith("//")):
                             # External link - wait for navigation
                             try:
@@ -300,7 +331,7 @@ class Navigator:
                     if attempt == retries - 1:
                         raise
                     # Exponential backoff: wait longer on each retry
-                    wait_time = 500 * (2 ** attempt)
+                    wait_time = Navigator.CLICK_RETRY_BASE_WAIT_MS * (2 ** attempt)
                     log.warning("click_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
                     await self.page.wait_for_timeout(wait_time)
             return
@@ -330,7 +361,7 @@ class Navigator:
                 except Exception as e:
                     if attempt == retries - 1:
                         raise
-                    wait_time = 500 * (2 ** attempt)
+                    wait_time = Navigator.TYPE_RETRY_BASE_WAIT_MS * (2 ** attempt)
                     log.warning("type_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
                     await self.page.wait_for_timeout(wait_time)
             return
@@ -386,8 +417,10 @@ class Navigator:
             
             for selector in modal_selectors:
                 try:
-                    modal = self.page.locator(selector).first
-                    if await modal.count() > 0:
+                    modal_locator = self.page.locator(selector)
+                    modal_count = await modal_locator.count()
+                    if modal_count > 0:
+                        modal = modal_locator.first
                         # Look for close button
                         close_selectors = [
                             'button[aria-label*="close" i]',
@@ -399,8 +432,9 @@ class Navigator:
                         ]
                         for close_sel in close_selectors:
                             try:
-                                close_btn = modal.locator(close_sel).first
-                                if await close_btn.count() > 0:
+                                close_btn_locator = modal.locator(close_sel)
+                                if await close_btn_locator.count() > 0:
+                                    close_btn = close_btn_locator.first
                                     await close_btn.click(timeout=2000)
                                     await self.page.wait_for_timeout(500)
                                     log.info("dismissed_modal", selector=selector, close_button=close_sel)
@@ -815,7 +849,7 @@ class Navigator:
         await self.page.evaluate(script)
         await self.page.wait_for_timeout(200)
 
-    def _parse_scroll_pixels(self, text: str) -> Optional[int]:
+    def _parse_scroll_pixels(self, text: Optional[str]) -> Optional[int]:
         """Parse scroll pixels from plan step value."""
         if text is None:
             return None
@@ -856,7 +890,7 @@ class Navigator:
             raise ValueError(f"Vision could not locate element: {element_description}")
         
         confidence = vision_result.get("confidence", 0.0)
-        if confidence < 0.7:
+        if confidence < Navigator.VISION_ELEMENT_CONFIDENCE_THRESHOLD:
             log.warning("vision_low_confidence", confidence=confidence, description=element_description)
         
         x = vision_result.get("x", 0)

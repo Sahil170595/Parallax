@@ -1,26 +1,89 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+try:
+    from aiolimiter import AsyncLimiter
+except ImportError:
+    # Fallback if aiolimiter not installed
+    class AsyncLimiter:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+
+try:
+    from tenacity import (
+        retry,
+        retry_if_exception_type,
+        stop_after_attempt,
+        wait_exponential,
+    )
+except ImportError:
+    # Fallback if tenacity not installed - create no-op decorator
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def stop_after_attempt(*args):
+        pass
+    def wait_exponential(*args, **kwargs):
+        pass
+    def retry_if_exception_type(*args):
+        pass
+
+from parallax.core.exceptions import (
+    LLMAPIError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
+from parallax.core.cost_tracker import CostTracker, PRICING
+from parallax.core.logging import get_logger
 from parallax.core.schemas import ExecutionPlan, PlanStep
+from parallax.llm.utils import extract_json_from_content
+
+log = get_logger("openai")
 
 try:
     from openai import AsyncOpenAI  # type: ignore
+    from openai import RateLimitError, APIError  # type: ignore
 except Exception:  # pragma: no cover
     AsyncOpenAI = None  # type: ignore
+    RateLimitError = Exception  # type: ignore
+    APIError = Exception  # type: ignore
 
 
 class OpenAIPlanner:
-    def __init__(self, model: str = "gpt-4.1-mini") -> None:
+    def __init__(
+        self,
+        model: str = "gpt-4.1-mini",
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        rate_limit_per_minute: int = 50,
+    ) -> None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAIPlanner")
         if AsyncOpenAI is None:
             raise RuntimeError("openai package not installed")
-        self.client = AsyncOpenAI(api_key=api_key)
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout)
         self.model = model
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.rate_limiter = AsyncLimiter(max_rate=rate_limit_per_minute, time_period=60)
+        self.cost_tracker = CostTracker()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((LLMTimeoutError, LLMRateLimitError)),
+        reraise=True,
+    )
     async def generate_plan(self, task: str, context: Dict) -> ExecutionPlan:
         system_prompt = """You are a web automation planner. Generate a JSON plan with ordered steps.
 
@@ -138,20 +201,56 @@ Generate a plan for the user task."""
             }
         ]
         
-        resp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                *examples,
-                {"role": "user", "content": task},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=1200,
-        )
+        async with self.rate_limiter:
+            try:
+                resp = await asyncio.wait_for(
+                    self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            *examples,
+                            {"role": "user", "content": task},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.2,
+                        max_tokens=1200,
+                    ),
+                    timeout=self.timeout,
+                )
+            except asyncio.TimeoutError:
+                log.error("llm_timeout", provider="openai", timeout=self.timeout)
+                raise LLMTimeoutError("openai", self.timeout) from None
+            except RateLimitError as e:
+                retry_after = getattr(e, "retry_after", None)
+                log.warning("rate_limit_exceeded", provider="openai", retry_after=retry_after)
+                raise LLMRateLimitError("openai", retry_after) from e
+            except APIError as e:
+                status_code = getattr(e, "status_code", None)
+                log.error("api_error", provider="openai", status_code=status_code, error=str(e))
+                raise LLMAPIError("openai", status_code, str(e), retryable=status_code and status_code >= 500) from e
+        
+        if not resp.choices:
+            raise LLMAPIError("openai", None, "No choices in OpenAI response", retryable=False)
+        
+        # Extract token usage and calculate cost
+        usage = getattr(resp, 'usage', None)
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        
+        # Track cost
+        self.cost_tracker.track_llm_call("openai", self.model, input_tokens, output_tokens)
+        
         content = resp.choices[0].message.content or "{}"
-        json_loader = context.get("json_loader", lambda x: __import__("json").loads(x))
-        data = json_loader(content)
+        try:
+            data = extract_json_from_content(content)
+        except (ValueError, json.JSONDecodeError) as e:
+            log.error("json_extraction_failed", error=str(e), content_preview=content[:200])
+            raise LLMAPIError("openai", None, f"Failed to extract JSON from LLM response: {e}", retryable=False) from e
+        
+        json_loader = context.get("json_loader", lambda x: json.loads(x))
+        # Use extracted data or try json_loader as fallback
+        if not isinstance(data, dict):
+            data = json_loader(content) if content else {}
         steps = [PlanStep(**s) for s in data.get("steps", [])]
         return ExecutionPlan(steps=steps)
 

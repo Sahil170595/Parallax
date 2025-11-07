@@ -24,57 +24,56 @@ class DatasetStore:
 
     def write_sqlite(self, path: Path, states: Iterable[UIState], app: str, task_slug: str) -> Path:
         db_path = path / "dataset.db"
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        
-        # Create tables
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS states (
-                id TEXT PRIMARY KEY,
-                url TEXT,
-                description TEXT,
-                has_modal INTEGER,
-                action TEXT,
-                state_signature TEXT,
-                metadata TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS screenshots (
-                state_id TEXT,
-                viewport TEXT,
-                filename TEXT,
-                FOREIGN KEY (state_id) REFERENCES states(id)
-            )
-        """)
-        
-        # Insert states
-        for state in states:
-            cursor.execute("""
-                INSERT OR REPLACE INTO states 
-                (id, url, description, has_modal, action, state_signature, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                state.id,
-                state.url,
-                state.description,
-                1 if state.has_modal else 0,
-                state.action,
-                state.state_signature,
-                json.dumps(state.metadata),
-            ))
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
             
-            # Insert screenshots
-            for viewport, filename in state.screenshots.items():
+            # Create tables
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS states (
+                    id TEXT PRIMARY KEY,
+                    url TEXT,
+                    description TEXT,
+                    has_modal INTEGER,
+                    action TEXT,
+                    state_signature TEXT,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS screenshots (
+                    state_id TEXT,
+                    viewport TEXT,
+                    filename TEXT,
+                    FOREIGN KEY (state_id) REFERENCES states(id)
+                )
+            """)
+            
+            # Insert states
+            for state in states:
                 cursor.execute("""
-                    INSERT OR REPLACE INTO screenshots (state_id, viewport, filename)
-                    VALUES (?, ?, ?)
-                """, (state.id, viewport, filename))
-        
-        conn.commit()
-        conn.close()
+                    INSERT OR REPLACE INTO states 
+                    (id, url, description, has_modal, action, state_signature, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    state.id,
+                    state.url,
+                    state.description,
+                    1 if state.has_modal else 0,
+                    state.action,
+                    state.state_signature,
+                    json.dumps(state.metadata),
+                ))
+                
+                # Insert screenshots
+                for viewport, filename in state.screenshots.items():
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO screenshots (state_id, viewport, filename)
+                        VALUES (?, ?, ?)
+                    """, (state.id, viewport, filename))
+            
+            conn.commit()
         return db_path
 
 

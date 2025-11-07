@@ -2,6 +2,8 @@
 
 Complete reference for all configuration options in Parallax.
 
+**New to Parallax?** See the [Quick Start Guide](QUICKSTART.md) for basic setup and configuration.
+
 ## Configuration File
 
 Configuration is stored in `configs/config.yaml`. The file is loaded automatically when running workflows.

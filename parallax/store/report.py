@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 from typing import Iterable
@@ -36,7 +37,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
     report = path / "report.html"
     states_list = list(states)
     
-    html = f"""<!DOCTYPE html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -544,7 +545,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
         
         action_html = f'''<div class="metadata-item">
                 <span class="metadata-label">Action:</span>
-                <code class="metadata-value">{s.action}</code>
+                <code class="metadata-value">{html.escape(str(s.action))}</code>
             </div>''' if s.action else ''
         
         badges_html = f'<div class="badges">{"".join(badges)}</div>' if badges else ''
@@ -556,23 +557,23 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
                 screenshots_html += f'''
                 <div class="screenshot-container">
                     <span class="screenshot-label">{viewport}</span>
-                    <img src="{filename}" data-asset="{filename}" data-full-src="{filename}" alt="Step {idx:02d} - {viewport}" class="screenshot asset-img" onclick="openModal(this.getAttribute('data-full-src'))" />
+                    <img src="{html.escape(filename)}" data-asset="{html.escape(filename)}" data-full-src="{html.escape(filename)}" alt="Step {idx:02d} - {html.escape(viewport)}" class="screenshot asset-img" onclick="openModal(this.getAttribute('data-full-src'))" />
                 </div>'''
             screenshots_html += '</div>'
         
-        html += f"""
+        html_content += f"""
             <div class="step">
                 <div class="step-header">
                     <div>
                         <div class="step-number">Step {idx:02d}</div>
-                        <div class="step-description">{s.description}</div>
+                        <div class="step-description">{html.escape(s.description)}</div>
                         {badges_html}
                     </div>
                 </div>
                 <div class="metadata">
                     <div class="metadata-item">
                         <span class="metadata-label">URL:</span>
-                        <code class="metadata-value">{s.url}</code>
+                        <code class="metadata-value">{html.escape(s.url)}</code>
                     </div>
                     {action_html}
                 </div>
@@ -580,10 +581,10 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
             </div>
 """
     
-    html += f"""
+    html_content += f"""
         </div>
         <div class="trace-link">
-            <a href="{trace_zip}" class="asset-link" data-asset="{trace_zip}">
+            <a href="{html.escape(trace_zip)}" class="asset-link" data-asset="{html.escape(trace_zip)}">
                 <span>📦</span>
                 <span>Download trace.zip</span>
             </a>
@@ -654,7 +655,7 @@ def write_html_report(path: Path, states: Iterable[UIState], trace_zip: str = "t
 </html>
 """
     
-    report.write_text(html, encoding="utf-8")
+    report.write_text(html_content, encoding="utf-8")
     return report
 
 

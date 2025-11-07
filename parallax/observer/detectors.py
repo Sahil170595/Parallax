@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from parallax.core.capture import redact_screenshot
 from parallax.core.schemas import UIState, RoleNode
 from parallax.observer.role_tree import jaccard_similarity
 
@@ -121,6 +122,13 @@ class Detectors:
         save_dir.mkdir(parents=True, exist_ok=True)
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
+        
+        # Apply redaction if enabled
+        capture_cfg = self.config.get("capture", {})
+        if capture_cfg.get("redact", {}).get("enabled", False):
+            selectors = capture_cfg.get("redact", {}).get("selectors", [])
+            redact_screenshot(out, selectors, capture_cfg)
+        
         return filename
 
     async def _screenshot_tablet(self, page, save_dir: Path, index: int) -> str:
@@ -133,6 +141,12 @@ class Detectors:
         filename = f"{index:02d}_tablet.png"
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
+        
+        # Apply redaction if enabled
+        if capture_cfg.get("redact", {}).get("enabled", False):
+            selectors = capture_cfg.get("redact", {}).get("selectors", [])
+            redact_screenshot(out, selectors, capture_cfg)
+        
         # Restore to original viewport if available, otherwise fall back to desktop default
         await page.set_viewport_size(original_size or desktop_viewport)
         return filename
@@ -142,11 +156,17 @@ class Detectors:
         original_size = page.viewport_size
         capture_cfg = self.config.get("capture", {})
         desktop_viewport = capture_cfg.get("desktop_viewport", {"width": 1366, "height": 832})
-        viewport = capture_cfg.get("mobile_viewport", {"width": 390, "height": 844})
-        await page.set_viewport_size(viewport)
+        mobile_viewport = capture_cfg.get("mobile_viewport", {"width": 390, "height": 844})
+        await page.set_viewport_size(mobile_viewport)
         filename = f"{index:02d}_mobile.png"
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
+        
+        # Apply redaction if enabled
+        if capture_cfg.get("redact", {}).get("enabled", False):
+            selectors = capture_cfg.get("redact", {}).get("selectors", [])
+            redact_screenshot(out, selectors, capture_cfg)
+        
         # Restore to original viewport if available, otherwise fall back to desktop default
         await page.set_viewport_size(original_size or desktop_viewport)
         return filename
@@ -174,6 +194,13 @@ class Detectors:
             path=str(out),
             clip=bounds,
         )
+        
+        # Apply redaction if enabled
+        capture_cfg = self.config.get("capture", {})
+        if capture_cfg.get("redact", {}).get("enabled", False):
+            selectors = capture_cfg.get("redact", {}).get("selectors", [])
+            redact_screenshot(out, selectors, capture_cfg)
+        
         return filename
 
     async def _detect_toast(self, page) -> bool:
