@@ -36,7 +36,12 @@ def validate_plan_non_empty(input_data: Any, output_data: ExecutionPlan, context
 
 def validate_plan_step_validity(input_data: Any, output_data: ExecutionPlan, context: Dict) -> tuple[bool, str, Dict]:
     """Validate that all plan steps have valid actions."""
-    valid_actions = {"navigate", "click", "type", "submit", "wait", "scroll"}
+    valid_actions = {
+        "navigate", "click", "type", "submit", "wait", "scroll",
+        "select", "drag", "upload", "hover", "double_click", "right_click",
+        "key_press", "screenshot", "evaluate", "fill", "check", "uncheck",
+        "focus", "blur", "press_key", "go_back", "go_forward", "reload"
+    }
     invalid_steps = []
     
     for idx, step in enumerate(output_data.steps):
@@ -57,6 +62,22 @@ def validate_plan_step_validity(input_data: Any, output_data: ExecutionPlan, con
             invalid_steps.append({"index": idx, "reason": "Navigate action missing target"})
         elif step.action == "type" and (not step.selector or not step.value):
             invalid_steps.append({"index": idx, "reason": "Type action missing selector or value"})
+        elif step.action == "select" and (not step.selector or not (step.value or step.option_value)):
+            invalid_steps.append({"index": idx, "reason": "Select action missing selector or value"})
+        elif step.action == "drag" and (not step.start_selector or not (step.end_selector or step.target)):
+            invalid_steps.append({"index": idx, "reason": "Drag action missing start_selector or end_selector/target"})
+        elif step.action == "upload" and (not step.selector or not (step.file_path or step.value)):
+            invalid_steps.append({"index": idx, "reason": "Upload action missing selector or file_path"})
+        elif step.action == "fill" and (not step.selector or not step.value):
+            invalid_steps.append({"index": idx, "reason": "Fill action missing selector or value"})
+        elif step.action == "check" and not step.selector:
+            invalid_steps.append({"index": idx, "reason": "Check action missing selector"})
+        elif step.action == "uncheck" and not step.selector:
+            invalid_steps.append({"index": idx, "reason": "Uncheck action missing selector"})
+        elif step.action == "hover" and not step.selector:
+            invalid_steps.append({"index": idx, "reason": "Hover action missing selector"})
+        elif step.action == "key_press" and not step.value:
+            invalid_steps.append({"index": idx, "reason": "Key press action missing value (key name)"})
     
     if invalid_steps:
         return False, f"Invalid steps found: {len(invalid_steps)}", {"invalid_steps": invalid_steps}
@@ -189,21 +210,37 @@ def validate_state_captured(input_data: Any, output_data: UIState, context: Dict
     }
 
 
+def validate_state_description(input_data: Any, output_data: UIState, context: Dict) -> tuple[bool, str, Dict]:
+    """Ensure states have meaningful descriptions."""
+    description = (output_data.description or "").strip().lower()
+    if not description or description in {"ui state", "ui state (stable)"}:
+        return False, "State description lacks detail", {"description": output_data.description}
+    return True, "State description present", {}
+
+
 def validate_minimum_states_captured(input_data: Any, output_data: List[UIState], context: Dict) -> tuple[bool, str, Dict]:
     """Validate that minimum number of states were captured."""
-    if not isinstance(output_data, list):
-        return False, "Output is not a list of states", {"type": type(output_data).__name__}
-    
+    states: List[UIState] | None = None
+    if isinstance(output_data, list):
+        states = output_data
+    elif isinstance(input_data, list):
+        states = input_data
+    if states is None:
+        return False, "No states provided for validation", {
+            "input_type": type(input_data).__name__,
+            "output_type": type(output_data).__name__,
+        }
+
     min_states = context.get("min_states", 1)
-    
-    if len(output_data) < min_states:
-        return False, f"Only {len(output_data)} states captured, expected at least {min_states}", {
-            "captured": len(output_data),
+
+    if len(states) < min_states:
+        return False, f"Only {len(states)} states captured, expected at least {min_states}", {
+            "captured": len(states),
             "expected_min": min_states,
         }
-    
-    return True, f"Captured {len(output_data)} states", {
-        "captured": len(output_data),
+
+    return True, f"Captured {len(states)} states", {
+        "captured": len(states),
         "expected_min": min_states,
     }
 
@@ -243,6 +280,12 @@ OBSERVER_CONSTITUTION = AgentConstitution(
             description="All screenshot files must exist",
             level=ValidationLevel.CRITICAL,
             validator=validate_screenshot_quality,
+        ),
+        ValidationRule(
+            name="state_description",
+            description="State should include a meaningful description",
+            level=ValidationLevel.WARNING,
+            validator=validate_state_description,
         ),
     ],
 )
@@ -315,6 +358,12 @@ ARCHIVIST_CONSTITUTION = AgentConstitution(
             description="All required dataset files must exist",
             level=ValidationLevel.CRITICAL,
             validator=validate_dataset_files,
+        ),
+        ValidationRule(
+            name="minimum_states",
+            description="Dataset must include at least one captured state",
+            level=ValidationLevel.CRITICAL,
+            validator=validate_minimum_states_captured,
         ),
         ValidationRule(
             name="dataset_data_integrity",

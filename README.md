@@ -20,6 +20,8 @@ Parallax executes natural-language web tasks end-to-end using Playwright and a p
 - 💰 **Cost Tracking:** Track LLM API costs per provider and model
 - 🏥 **Health Checks:** Built-in health monitoring and dependency checks
 - 🔒 **Security:** Input validation, HTML escaping, secure resource management
+- 🌐 **Chrome Support:** Use installed Chrome browser for better compatibility
+- 🔐 **Authentication:** Persistent browser contexts for authenticated workflows
 
 ## Quickstart
 
@@ -167,6 +169,7 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for details.
 - **[Configuration Reference](docs/CONFIGURATION.md)** - Complete configuration options
 - **[Architecture](docs/ARCHITECTURE.md)** - System design and architecture
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
+- **[Authentication Guide](AUTHENTICATION.md)** - Setting up authenticated workflows 🔐
 - **[Contributing](CONTRIBUTING.md)** - Guidelines for contributing
 
 ## Development

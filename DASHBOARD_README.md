@@ -102,6 +102,19 @@ The dashboard uses the same configuration as the CLI (`configs/config.yaml`):
 - **Provider**: LLM provider (openai, local, auto)
 - **Action Budget**: Maximum actions per workflow
 - **Headless**: Browser visibility setting
+- **Channel**: Browser channel (chrome for installed Chrome)
+- **User Data Dir**: Persistent context path for authentication
+
+**Example configuration:**
+```yaml
+playwright:
+  headless: false
+  project: chromium
+  channel: chrome  # Use installed Chrome
+  user_data_dir: ~/.parallax/browser_data/myapp  # For authentication
+```
+
+See [Configuration Reference](../docs/CONFIGURATION.md) for all options.
 
 ## Tips
 
@@ -119,6 +132,7 @@ The dashboard uses the same configuration as the CLI (`configs/config.yaml`):
 ### Tasks fail to run
 - Verify your API keys are set in `.env` or environment variables
 - Check that Playwright browsers are installed: `playwright install`
+- For authenticated workflows, set up authentication first: `python authenticate.py <app_name>`
 - Review the error messages in the dashboard for specific issues
 
 ### No datasets showing

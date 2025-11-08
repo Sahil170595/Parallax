@@ -10,12 +10,16 @@ class PlanStep:
     A single step in an execution plan.
     
     Attributes:
-        action: Action type (e.g., "navigate", "click", "type", "submit")
-        target: Target URL for navigation actions
+        action: Action type (e.g., "navigate", "click", "type", "submit", "select", "drag", "upload", "hover")
+        target: Target URL for navigation actions, or end target for drag actions
         role: ARIA role for semantic selection (e.g., "button", "textbox")
         name: ARIA name or accessible name for semantic selection
         selector: CSS selector or data-testid for element selection
-        value: Value to type into text inputs
+        value: Value to type into text inputs, select option value, or file path for upload
+        start_selector: Start selector for drag actions
+        end_selector: End selector for drag actions
+        file_path: File path for upload actions
+        option_value: Option value for select actions
     """
     action: str
     target: Optional[str] = None
@@ -23,6 +27,10 @@ class PlanStep:
     name: Optional[str] = None
     selector: Optional[str] = None
     value: Optional[str] = None
+    start_selector: Optional[str] = None
+    end_selector: Optional[str] = None
+    file_path: Optional[str] = None
+    option_value: Optional[str] = None
 
 
 @dataclass

@@ -107,8 +107,25 @@ Available Actions:
 - click: {{"action": "click", "role": "button", "name": "Create"}} or {{"action": "click", "role": "link", "name": "About"}} or {{"action": "click", "selector": "button[data-testid='submit']"}}
 - type: {{"action": "type", "selector": "input[name='title']", "value": "My Title"}}
 - submit: {{"action": "submit", "selector": "button[type='submit']"}}
-- wait: {{"action": "wait", "value": "2s"}}
+- select: {{"action": "select", "selector": "select[name='status']", "value": "active"}} or {{"action": "select", "selector": "select", "option_value": "option1"}}
+- drag: {{"action": "drag", "start_selector": "#item1", "end_selector": "#dropzone"}} or {{"action": "drag", "start_selector": "#item1", "target": "#dropzone"}}
+- upload: {{"action": "upload", "selector": "input[type='file']", "file_path": "/path/to/file.pdf"}} or {{"action": "upload", "selector": "input[type='file']", "value": "/path/to/file.pdf"}}
+- hover: {{"action": "hover", "selector": "button.menu", "role": "button", "name": "Menu"}}
+- double_click: {{"action": "double_click", "selector": "#item", "role": "button", "name": "Item"}}
+- right_click: {{"action": "right_click", "selector": "#context-menu", "role": "button"}}
+- fill: {{"action": "fill", "selector": "input[name='email']", "value": "user@example.com"}}
+- check: {{"action": "check", "selector": "input[type='checkbox']", "name": "Accept Terms"}}
+- uncheck: {{"action": "uncheck", "selector": "input[type='checkbox']", "name": "Newsletter"}}
+- focus: {{"action": "focus", "selector": "input[name='search']"}}
+- blur: {{"action": "blur", "selector": "input[name='search']"}}
+- key_press: {{"action": "key_press", "value": "Enter"}} or {{"action": "press_key", "value": "Escape"}}
+- wait: {{"action": "wait", "value": "2s"}} or {{"action": "wait", "value": "1000ms"}}
 - scroll: {{"action": "scroll", "value": "down"}} or {{"action": "scroll", "selector": "#section"}}
+- go_back: {{"action": "go_back"}}
+- go_forward: {{"action": "go_forward"}}
+- reload: {{"action": "reload"}}
+- screenshot: {{"action": "screenshot", "value": "screenshot.png"}}
+- evaluate: {{"action": "evaluate", "value": "document.title"}}
 
 Examples:
 Task: "Explore all tabs on a website"

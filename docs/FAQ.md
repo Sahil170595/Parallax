@@ -144,10 +144,23 @@ navigation:
 
 ### "Authentication redirect detected"
 
-**Solution:** The workflow detected an authentication redirect. You may need to:
-- Log in manually before running workflow
-- Use authenticated browser context
-- Handle authentication in custom code
+**Solution:** Use persistent browser contexts for authentication:
+
+1. **Authenticate once:**
+   ```bash
+   python authenticate.py linear
+   ```
+
+2. **Configure in `configs/config.yaml`:**
+   ```yaml
+   playwright:
+     channel: chrome
+     user_data_dir: ~/.parallax/browser_data/linear
+   ```
+
+3. **Run workflows** - they'll use the saved session
+
+See [Authentication Guide](../../AUTHENTICATION.md) for detailed instructions.
 
 ### "Constitution violation"
 
@@ -318,7 +331,7 @@ No user credentials or sensitive data (if redaction is enabled).
 
 ### What are Parallax's limitations?
 
-1. **Authentication:** Requires manual login or authenticated context
+1. **Authentication:** Requires one-time setup with `authenticate.py` script (see [Authentication Guide](../../AUTHENTICATION.md))
 2. **Complex Workflows:** May struggle with very complex multi-step workflows
 3. **Dynamic Content:** May miss rapidly changing content
 4. **Vision Features:** Requires API keys and may increase costs
@@ -326,8 +339,18 @@ No user credentials or sensitive data (if redaction is enabled).
 ### What browsers are supported?
 
 - Chromium (default)
+- Chrome (via `channel: chrome` - recommended for authentication)
 - Firefox
 - WebKit
+
+**Using Chrome:**
+```yaml
+playwright:
+  project: chromium
+  channel: chrome  # Use installed Chrome
+```
+
+Chrome provides better compatibility and authentication support.
 
 ### What websites work best?
 

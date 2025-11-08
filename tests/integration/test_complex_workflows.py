@@ -24,7 +24,10 @@ from parallax.observer.detectors import Detectors
 async def browser_context():
     """Create a browser context for testing."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception as exc:  # pragma: no cover - depends on host setup
+            pytest.skip(f"Playwright browser unavailable: {exc}")
         context = await browser.new_context()
         page = await context.new_page()
         yield page

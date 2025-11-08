@@ -136,6 +136,41 @@ Open `report.html` in a browser to view:
 
 ## Advanced Usage
 
+### Using Authentication
+
+For workflows that require login (e.g., Linear, Notion):
+
+1. **Authenticate once:**
+   ```bash
+   python authenticate.py linear
+   ```
+
+2. **Update `configs/config.yaml`:**
+   ```yaml
+   playwright:
+     channel: chrome
+     user_data_dir: ~/.parallax/browser_data/linear
+   ```
+
+3. **Run workflows** - they'll use the saved session automatically
+
+See [Authentication Guide](../../AUTHENTICATION.md) for complete instructions.
+
+### Using Chrome Browser
+
+Use installed Chrome for better compatibility:
+
+```yaml
+playwright:
+  project: chromium
+  channel: chrome  # Use installed Chrome
+```
+
+**Benefits:**
+- Better website compatibility
+- Improved authentication support
+- More realistic browser fingerprint
+
 ### Using Vision Features
 
 Enable vision features in `configs/config.yaml`:
@@ -264,10 +299,23 @@ python -m parallax.core.constitution_cli list --agent A2_Navigator
 
 #### 6. "Authentication redirect detected"
 
-**Solution:** The workflow detected an authentication redirect. You may need to:
-- Log in manually before running workflow
-- Use authenticated browser context
-- Handle authentication in custom code
+**Solution:** The workflow detected an authentication redirect. Use persistent browser contexts:
+
+1. **Authenticate once:**
+   ```bash
+   python authenticate.py linear
+   ```
+
+2. **Configure persistent context in `configs/config.yaml`:**
+   ```yaml
+   playwright:
+     channel: chrome
+     user_data_dir: ~/.parallax/browser_data/linear
+   ```
+
+3. **Run your workflow** - it will use the saved session
+
+See [Authentication Guide](../../AUTHENTICATION.md) for detailed instructions.
 
 ---
 

@@ -21,14 +21,18 @@ from PIL import Image
 # Import Parallax components
 from parallax.core.config import ParallaxConfig
 from parallax.core.constitution import FailureStore
+from parallax.core.metrics import ensure_metrics_server
 from parallax.core.schemas import ExecutionPlan, PlanStep, UIState
+from parallax.core.plan_overrides import apply_site_overrides
+from parallax.agents.archivist import Archivist
 from parallax.agents.interpreter import Interpreter
 from parallax.agents.navigator import Navigator
 from parallax.agents.observer import Observer
-from parallax.agents.archivist import Archivist
+from parallax.agents.strategy_generator import StrategyGenerator
 from parallax.observer.detectors import Detectors
-from parallax.llm.openai_provider import OpenAIPlanner
+from parallax.llm.anthropic_provider import AnthropicPlanner
 from parallax.llm.local_provider import LocalPlanner
+from parallax.llm.openai_provider import OpenAIPlanner
 from parallax.core.trace import TraceController
 from playwright.async_api import async_playwright
 import os
@@ -101,13 +105,17 @@ def planner_from_config(cfg: ParallaxConfig):
     provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
         return OpenAIPlanner()
+    if provider == "anthropic":
+        return AnthropicPlanner()
     if provider == "local":
         return LocalPlanner()
-    # auto: prefer OpenAI, then Local
-    try:
-        return OpenAIPlanner()
-    except Exception:
-        return LocalPlanner()
+    planner_factories = (OpenAIPlanner, AnthropicPlanner, LocalPlanner)
+    for factory in planner_factories:
+        try:
+            return factory()
+        except Exception:
+            continue
+    raise RuntimeError("No LLM planner available")
 
 
 def slugify(text: str) -> str:
@@ -285,15 +293,22 @@ def show_run_task_page(cfg: ParallaxConfig):
                 value=cfg.navigation.action_budget,
                 help="Maximum number of actions to execute"
             )
+        capture_multi = st.checkbox(
+            "Capture tablet & mobile screenshots",
+            value=cfg.capture.multi_viewport,
+            help="Disable to iterate faster; re-enable before generating final datasets.",
+        )
         
         submitted = st.form_submit_button("🚀 Run Task", use_container_width=True)
     
     if submitted and task:
+        cfg.capture.multi_viewport = capture_multi
         run_task_execution(task, app_name, start_url, action_budget, cfg)
 
 
 def run_task_execution(task: str, app_name: str, start_url: str, action_budget: int, cfg: ParallaxConfig):
     """Execute a task and show real-time progress."""
+    ensure_metrics_server(cfg.metrics.prometheus_port)
     
     progress_container = st.container()
     status_container = st.container()
@@ -310,7 +325,12 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
         planner = planner_from_config(cfg)
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        interpreter = Interpreter(planner, failure_store=failure_store)
+        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        interpreter = Interpreter(
+            planner,
+            failure_store=failure_store,
+            strategy_generator=strategy_generator,
+        )
         
         # Planning phase
         with status_container:
@@ -318,6 +338,7 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                 status_text.text("Planning workflow...")
                 plan_context = {"start_url": start_url}
                 plan = asyncio.run(interpreter.plan(task, plan_context))
+                plan = apply_site_overrides(plan, start_url)
                 
                 status.update(label=f"✅ Plan generated: {len(plan.steps)} steps", state="complete")
                 status_text.text(f"Plan generated: {len(plan.steps)} steps")
@@ -353,9 +374,60 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                 async with async_playwright() as p:
                     browser_type = cfg.playwright.project
                     headless = cfg.playwright.headless
-                    browser = await getattr(p, browser_type).launch(headless=headless)
-                    context = await browser.new_context()
-                    page = await context.new_page()
+                    channel = cfg.playwright.channel
+                    user_data_dir = cfg.playwright.user_data_dir
+                    browser = None
+                    
+                    # Use persistent context if user_data_dir is specified (for authentication)
+                    if user_data_dir:
+                        from pathlib import Path
+                        user_data_path = Path(user_data_dir).expanduser().resolve()
+                        user_data_path.mkdir(parents=True, exist_ok=True)
+                        
+                        browser_launcher = getattr(p, browser_type)
+                        context_kwargs = {}
+                        if channel and browser_type == "chromium":
+                            context_kwargs["channel"] = channel
+                        if not headless:
+                            context_kwargs["headless"] = False
+                        
+                        # Chrome args to disable automation detection and security warnings
+                        if browser_type == "chromium":
+                            context_kwargs["args"] = [
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-dev-shm-usage",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                                "--disable-infobars",
+                            ]
+                            context_kwargs["viewport"] = {"width": 1920, "height": 1080}
+                            context_kwargs["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        
+                        # Create persistent context (saves cookies/sessions)
+                        context = await browser_launcher.launch_persistent_context(
+                            user_data_dir=str(user_data_path),
+                            **context_kwargs
+                        )
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        
+                        # Remove automation indicators from page
+                        await page.add_init_script("""
+                            Object.defineProperty(navigator, 'webdriver', {
+                                get: () => undefined
+                            });
+                            window.chrome = {
+                                runtime: {}
+                            };
+                        """)
+                    else:
+                        # Regular browser context
+                        browser_launcher = getattr(p, browser_type)
+                        launch_kwargs = {"headless": headless}
+                        if channel and browser_type == "chromium":
+                            launch_kwargs["channel"] = channel
+                        browser = await browser_launcher.launch(**launch_kwargs)
+                        context = await browser.new_context()
+                        page = await context.new_page()
                     
                     # Merge observer and capture configs for Detectors
                     detector_config = cfg.observer.model_dump() if hasattr(cfg.observer, 'model_dump') else cfg.observer.dict()
@@ -392,32 +464,60 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                         failure_store=failure_store,
                         task_context=task,
                         progress_callback=progress_callback,
+                        strategy_generator=strategy_generator,
                     )
                     
                     # Execute plan
-                    await navigator.execute(plan, action_budget=action_budget)
-                    
-                    # Finalize
-                    nav_context = {
-                        "page": page,
-                        "action_budget": action_budget,
-                        "action_count": navigator.action_count,
-                        "start_url": start_url,
-                    }
-                    
                     trace_zip_path = task_dir / "trace.zip"
-                    await tracer.stop(trace_zip_path)
-                    
-                    nav_report = navigator.finalize(plan, nav_context)
-                    
-                    # Save dataset
-                    archivist = Archivist(datasets_dir, failure_store=failure_store)
-                    root = archivist.write_states(app_name, slug, observer.states, trace_zip="trace.zip")
-                    
-                    await context.close()
-                    await browser.close()
-                    
-                    return root, observer.states
+                    tracer_stopped = False
+                    try:
+                        await navigator.execute(plan, action_budget=action_budget)
+                        
+                        # Finalize
+                        nav_context = {
+                            "page": page,
+                            "action_budget": action_budget,
+                            "action_count": navigator.action_count,
+                            "start_url": start_url,
+                        }
+                        
+                        await tracer.stop(trace_zip_path)
+                        tracer_stopped = True
+                        
+                        nav_report = navigator.finalize(plan, nav_context)
+
+                        from parallax.core.completion import CompletionValidationError, validate_completion
+                        try:
+                            validate_completion(
+                                plan,
+                                observer.states,
+                                min_targets=cfg.completion.min_targets,
+                            )
+                        except CompletionValidationError as exc:
+                            raise RuntimeError(f"Completion validation failed: {', '.join(exc.missing)}") from exc
+                        
+                        # Save dataset
+                        archivist = Archivist(datasets_dir, failure_store=failure_store)
+                        root = archivist.write_states(app_name, slug, observer.states, trace_zip="trace.zip")
+                        
+                        return root, observer.states
+                    finally:
+                        # Ensure cleanup happens even if exceptions occur
+                        if tracer and not tracer_stopped:
+                            try:
+                                await tracer.stop(trace_zip_path)
+                            except Exception:
+                                pass
+                        if context:
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
+                        if browser:
+                            try:
+                                await browser.close()
+                            except Exception:
+                                pass
             
             # Run execution
             root, states = asyncio.run(execute_workflow())

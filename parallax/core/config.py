@@ -37,6 +37,7 @@ class RedactConfig(BaseModel):
 
 class CaptureConfig(BaseModel):
     """Screenshot capture configuration."""
+    multi_viewport: bool = Field(default=True)
     desktop_viewport: ViewportConfig = Field(
         default_factory=lambda: ViewportConfig(width=1366, height=832)
     )
@@ -62,6 +63,11 @@ class OutputConfig(BaseModel):
     base_dir: str = Field(default="datasets")
 
 
+class CompletionConfig(BaseModel):
+    """Completion validation configuration."""
+    min_targets: int = Field(default=1, ge=1, le=10)
+
+
 class MetricsConfig(BaseModel):
     """Metrics configuration."""
     prometheus_port: int = Field(default=9109, ge=1024, le=65535)
@@ -71,6 +77,8 @@ class PlaywrightConfig(BaseModel):
     """Playwright browser configuration."""
     headless: bool = Field(default=True)
     project: Literal["chromium", "firefox", "webkit"] = Field(default="chromium")
+    channel: Optional[str] = Field(default=None, description="Browser channel (e.g., 'chrome' to use installed Chrome instead of Chromium)")
+    user_data_dir: Optional[str] = Field(default=None, description="Path to user data directory for persistent browser context (saves cookies/sessions for authentication)")
 
 
 class VisionConfig(BaseModel):
@@ -95,6 +103,7 @@ class ParallaxConfig(BaseModel):
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     observer: ObserverConfig = Field(default_factory=ObserverConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    completion: CompletionConfig = Field(default_factory=CompletionConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     playwright: PlaywrightConfig = Field(default_factory=PlaywrightConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)

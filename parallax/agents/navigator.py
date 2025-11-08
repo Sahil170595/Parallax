@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from parallax.agents.observer import Observer
 
 from parallax.agents.constitutions import NAVIGATOR_CONSTITUTION
+from parallax.agents.strategy_generator import StrategyGenerator, SelectorStrategy
 from parallax.core.constitution import (
     ConstitutionReport,
     ConstitutionViolation,
@@ -78,6 +79,7 @@ class Navigator:
         vision_analyzer: Optional[Any] = None,
         task_context: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, Any], Awaitable[None]]] = None,
+        strategy_generator: Optional[StrategyGenerator] = None,
     ) -> None:
         self.page = page
         self.observer = observer
@@ -88,6 +90,7 @@ class Navigator:
         self.vision_analyzer = vision_analyzer
         self.task_context = task_context
         self.progress_callback = progress_callback
+        self.strategy_generator = strategy_generator
         self._workflow_states = []
         try:
             self.scroll_margin_px = max(0, int(scroll_margin_px))
@@ -199,6 +202,63 @@ class Navigator:
                     except Exception:
                         pass  # If state capture also fails, continue
                 
+                # Try strategy-based fallback if available
+                if self.strategy_generator and step.action in ["click", "type", "select", "hover", "focus"]:
+                    try:
+                        log.info("trying_strategy_fallback", step=step.action)
+                        website_pattern = self.page.url.split("/")[2] if self.page.url else None
+                        improved_step = self.strategy_generator.suggest_improved_step(
+                            step,
+                            str(e),
+                            website_pattern,
+                        )
+                        if improved_step:
+                            await self._run_step(improved_step, retries=2)
+                            self.action_count += 1
+                            if self.observer is not None:
+                                action_desc = self._describe_action(improved_step)
+                                state = await self.observer.observe(action_desc)
+                                if state:
+                                    self._workflow_states.append(state)
+                            # Record strategy success
+                            if step.name or step.selector:
+                                element_desc = step.name or step.selector or ""
+                                strategies = self.strategy_generator.get_best_strategies(
+                                    element_desc,
+                                    website_pattern,
+                                limit=1,
+                                step=step,
+                                )
+                                if strategies:
+                                    self.strategy_generator.record_strategy_result(
+                                        strategies[0],
+                                        True,
+                                        element_desc,
+                                    website_pattern,
+                                    step=step,
+                                    )
+                            continue
+                    except Exception as strategy_error:
+                        log.warning("strategy_fallback_failed", error=str(strategy_error))
+                        # Record strategy failure
+                        if self.strategy_generator and (step.name or step.selector):
+                            element_desc = step.name or step.selector or ""
+                            website_pattern = self.page.url.split("/")[2] if self.page.url else None
+                            strategies = self.strategy_generator.get_best_strategies(
+                                element_desc,
+                                website_pattern,
+                                limit=1,
+                                step=step,
+                            )
+                            if strategies:
+                                self.strategy_generator.record_strategy_result(
+                                    strategies[0],
+                                    False,
+                                    element_desc,
+                                    website_pattern,
+                                    step=step,
+                                )
+                
                 # Try vision-based fallback if selector failed
                 if self.vision_analyzer and step.action in ["click", "type", "submit"]:
                     try:
@@ -246,6 +306,7 @@ class Navigator:
             for attempt in range(retries):
                 try:
                     locator = await self._resolve_locator_with_retry(step, attempt)
+                    locator = await self._maybe_reveal_hidden(locator, step)
                     # Handle multiple matches by using first if selector is used
                     if step.selector and await locator.count() > 1:
                         locator = locator.first
@@ -335,13 +396,13 @@ class Navigator:
                     log.warning("click_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
                     await self.page.wait_for_timeout(wait_time)
             return
-        if action == "type" and step.selector and step.value is not None:
+        if action == "type" and step.value is not None:
             for attempt in range(retries):
                 try:
                     # Dismiss modals first
                     await self._dismiss_modals_if_safe()
                     
-                    loc = self.page.locator(step.selector)
+                    loc = await self._resolve_locator_with_retry(step, attempt)
                     await self._wait_for_interactable(loc, timeout=5000)
                     
                     # Clear field first if needed
@@ -378,6 +439,211 @@ class Navigator:
                     log.warning("submit_retry", attempt=attempt + 1, error=str(e))
                     await self.page.wait_for_timeout(500)
             return
+        if action == "select" and step.selector and (step.value or step.option_value):
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    option_value = step.option_value or step.value
+                    await loc.select_option(option_value)
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("select_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "drag" and step.start_selector and (step.end_selector or step.target):
+            for attempt in range(retries):
+                try:
+                    start_loc = self.page.locator(step.start_selector)
+                    end_loc = self.page.locator(step.end_selector) if step.end_selector else self.page.locator(step.target)
+                    await start_loc.wait_for(state="visible", timeout=5000)
+                    await end_loc.wait_for(state="visible", timeout=5000)
+                    await start_loc.drag_to(end_loc)
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("drag_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "upload" and step.selector and (step.file_path or step.value):
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    file_path = step.file_path or step.value
+                    await loc.set_input_files(file_path)
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("upload_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "hover" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = await self._resolve_locator_with_retry(step, attempt)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.hover()
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("hover_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "double_click" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = await self._resolve_locator_with_retry(step, attempt)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.dblclick()
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("double_click_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "right_click" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = await self._resolve_locator_with_retry(step, attempt)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.click(button="right")
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("right_click_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "fill" and step.selector and step.value:
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.fill(step.value)
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("fill_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "check" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.check()
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("check_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "uncheck" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.uncheck()
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("uncheck_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "focus":
+            for attempt in range(retries):
+                try:
+                    loc = await self._resolve_locator_with_retry(step, attempt)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.focus()
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("focus_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action == "blur" and step.selector:
+            for attempt in range(retries):
+                try:
+                    loc = self.page.locator(step.selector)
+                    await loc.wait_for(state="visible", timeout=5000)
+                    await loc.evaluate("element => element.blur()")
+                    await self.page.wait_for_timeout(self.default_wait_ms)
+                    return
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    log.warning("blur_retry", attempt=attempt + 1, error=str(e))
+                    await self.page.wait_for_timeout(500)
+            return
+        if action in ("key_press", "press_key") and step.value:
+            try:
+                await self.page.keyboard.press(step.value)
+                await self.page.wait_for_timeout(self.default_wait_ms)
+                return
+            except Exception as e:
+                log.warning("key_press_failed", key=step.value, error=str(e))
+                raise
+        if action == "go_back":
+            try:
+                await self.page.go_back()
+                await self.page.wait_for_load_state("networkidle", timeout=10000)
+                return
+            except Exception as e:
+                log.warning("go_back_failed", error=str(e))
+                raise
+        if action == "go_forward":
+            try:
+                await self.page.go_forward()
+                await self.page.wait_for_load_state("networkidle", timeout=10000)
+                return
+            except Exception as e:
+                log.warning("go_forward_failed", error=str(e))
+                raise
+        if action == "reload":
+            try:
+                await self.page.reload(wait_until="networkidle", timeout=30000)
+                return
+            except Exception as e:
+                log.warning("reload_failed", error=str(e))
+                raise
+        if action == "screenshot":
+            try:
+                screenshot_path = step.value or step.target or "screenshot.png"
+                await self.page.screenshot(path=screenshot_path, full_page=step.selector is None)
+                return
+            except Exception as e:
+                log.warning("screenshot_failed", error=str(e))
+                raise
+        if action == "evaluate" and step.value:
+            try:
+                result = await self.page.evaluate(step.value)
+                log.debug("evaluate_result", result=str(result)[:100])
+                return
+            except Exception as e:
+                log.warning("evaluate_failed", error=str(e))
+                raise
 
     async def _robust_navigate(self, url: str) -> None:
         """Navigate to URL with multiple fallback strategies."""
@@ -481,6 +747,45 @@ class Navigator:
             log.debug("wait_for_interactable_failed", error=str(e))
             raise
 
+    async def _maybe_reveal_hidden(self, locator, step):
+        """If locator is hidden, try to reveal dropdown/menu items."""
+        try:
+            if await locator.is_visible():
+                return locator
+        except Exception:
+            pass
+
+        name = getattr(step, "name", None)
+        if step.role == "link" and name:
+            candidates = [
+                self.page.get_by_role("button", name=name, exact=False),
+                self.page.get_by_role("menuitem", name=name, exact=False),
+                self.page.locator(f"[aria-label*=\"{name}\"]"),
+                self.page.locator(f"[data-track-label*=\"{name}\"]"),
+            ]
+            for candidate in candidates:
+                try:
+                    if await candidate.count() == 0:
+                        continue
+                    toggle = candidate.first
+                    if not await toggle.is_visible():
+                        continue
+                    await toggle.hover()
+                    try:
+                        await toggle.click()
+                    except Exception:
+                        pass
+                    await self.page.wait_for_timeout(200)
+                    refreshed = await self._resolve_locator_with_retry(step, 0)
+                    try:
+                        if await refreshed.is_visible():
+                            return refreshed
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+        return locator
+
     async def _resolve_locator_with_retry(self, step, attempt: int = 0):
         """Resolve locator with multiple resilient strategies."""
         variants = self._text_variants(step.name) if step.name else []
@@ -510,7 +815,8 @@ class Navigator:
         if step.selector:
             try:
                 locator = await self._first_matching_locator(
-                    [self.page.locator(step.selector)]
+                    [self.page.locator(step.selector)],
+                    allow_empty=True,
                 )
                 if locator:
                     return locator
@@ -673,7 +979,7 @@ class Navigator:
     def _text_regex(self, text: str) -> re.Pattern[str]:
         return re.compile(re.escape(text), re.IGNORECASE)
 
-    async def _first_matching_locator(self, locators: Iterable[Any]) -> Optional[Any]:
+    async def _first_matching_locator(self, locators: Iterable[Any], allow_empty: bool = False) -> Optional[Any]:
         for locator in locators:
             if locator is None:
                 continue
@@ -687,6 +993,8 @@ class Navigator:
                     return locator.first if count > 1 else locator
                 except Exception:
                     return locator
+            if allow_empty:
+                return locator
         return None
 
     async def _resolve_data_testid(self, variants: Iterable[str]) -> Optional[Any]:

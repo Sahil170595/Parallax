@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from parallax.core.capture import redact_screenshot
 from parallax.core.schemas import UIState, RoleNode
@@ -38,14 +39,17 @@ class Detectors:
         has_loader = await self._detect_loader(page)
         role_diff = self._compute_role_diff(roles)
         signature = self._hash_signature(url, roles)
-        description = self._describe(roles, has_toast, form_validity, has_loader)
+        description = self._describe(url, roles, has_toast, form_validity, has_loader, role_diff)
         
+        capture_cfg = self.config.get("capture", {})
+        multi_viewport = capture_cfg.get("multi_viewport", True)
         # Multi-viewport screenshots
         screenshots = {}
         if save_dir:
             screenshots["desktop"] = await self._screenshot(page, save_dir, index, "desktop")
-            screenshots["tablet"] = await self._screenshot_tablet(page, save_dir, index)
-            screenshots["mobile"] = await self._screenshot_mobile(page, save_dir, index)
+            if multi_viewport:
+                screenshots["tablet"] = await self._screenshot_tablet(page, save_dir, index)
+                screenshots["mobile"] = await self._screenshot_mobile(page, save_dir, index)
             # Focus crop if modal/dialog present
             if has_modal:
                 focus_crop = await self._screenshot_focus(page, save_dir, index)
@@ -85,14 +89,30 @@ class Detectors:
             "has_loader": has_loader,
             "role_diff": role_diff,
         }
-        
+
+        significance = self._determine_significance(
+            url=url,
+            has_modal=has_modal,
+            has_toast=has_toast,
+            form_validity=form_validity,
+            role_diff=role_diff,
+            has_loader=has_loader,
+        )
+        metadata.update(significance)
+
         # Add vision analysis to metadata
         if vision_significance:
-            metadata["vision_significance"] = vision_significance.get("significance", "optional")
-            metadata["vision_confidence"] = vision_significance.get("confidence", 0.0)
-            metadata["vision_reasoning"] = vision_significance.get("reasoning", "")
-            metadata["vision_key_elements"] = vision_significance.get("key_elements", [])
-        
+            metadata["vision_analysis"] = vision_significance
+            metadata["significance"] = vision_significance.get(
+                "significance", metadata.get("significance", "optional")
+            )
+            metadata["significance_confidence"] = vision_significance.get(
+                "confidence", metadata.get("significance_confidence", 0.5)
+            )
+            metadata["significance_reasoning"] = vision_significance.get(
+                "reasoning", metadata.get("significance_reasoning", "")
+            )
+
         state = UIState(
             id=f"state_{signature[:8]}",
             url=url,
@@ -122,13 +142,7 @@ class Detectors:
         save_dir.mkdir(parents=True, exist_ok=True)
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
-        
-        # Apply redaction if enabled
-        capture_cfg = self.config.get("capture", {})
-        if capture_cfg.get("redact", {}).get("enabled", False):
-            selectors = capture_cfg.get("redact", {}).get("selectors", [])
-            redact_screenshot(out, selectors, capture_cfg)
-        
+        await self._redact_viewport(page, out)
         return filename
 
     async def _screenshot_tablet(self, page, save_dir: Path, index: int) -> str:
@@ -142,10 +156,7 @@ class Detectors:
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
         
-        # Apply redaction if enabled
-        if capture_cfg.get("redact", {}).get("enabled", False):
-            selectors = capture_cfg.get("redact", {}).get("selectors", [])
-            redact_screenshot(out, selectors, capture_cfg)
+        await self._redact_viewport(page, out)
         
         # Restore to original viewport if available, otherwise fall back to desktop default
         await page.set_viewport_size(original_size or desktop_viewport)
@@ -162,10 +173,7 @@ class Detectors:
         out = save_dir / filename
         await page.screenshot(path=str(out), full_page=True)
         
-        # Apply redaction if enabled
-        if capture_cfg.get("redact", {}).get("enabled", False):
-            selectors = capture_cfg.get("redact", {}).get("selectors", [])
-            redact_screenshot(out, selectors, capture_cfg)
+        await self._redact_viewport(page, out)
         
         # Restore to original viewport if available, otherwise fall back to desktop default
         await page.set_viewport_size(original_size or desktop_viewport)
@@ -195,11 +203,8 @@ class Detectors:
             clip=bounds,
         )
         
-        # Apply redaction if enabled
         capture_cfg = self.config.get("capture", {})
-        if capture_cfg.get("redact", {}).get("enabled", False):
-            selectors = capture_cfg.get("redact", {}).get("selectors", [])
-            redact_screenshot(out, selectors, capture_cfg)
+        redact_screenshot(out, [bounds], capture_cfg)
         
         return filename
 
@@ -282,8 +287,20 @@ class Detectors:
         }, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _describe(self, roles: List[RoleNode], has_toast: bool, form_validity: Optional[bool], has_loader: bool) -> str:
-        parts = []
+    def _describe(
+        self,
+        url: str,
+        roles: List[RoleNode],
+        has_toast: bool,
+        form_validity: Optional[bool],
+        has_loader: bool,
+        role_diff: Optional[float],
+    ) -> str:
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        page_label = path.strip("/") or "home"
+        parts = [f"{page_label.capitalize()} page"]
+
         dialogs = [r for r in roles if r.role == "dialog"]
         if dialogs:
             parts.append("Dialog open")
@@ -295,8 +312,92 @@ class Detectors:
             parts.append("Form valid")
         if has_loader:
             parts.append("Loading")
-        if not parts:
-            return "UI state"
+        if role_diff is not None:
+            parts.append(f"Structure changed ({role_diff:.2f})")
+
         return " | ".join(parts)
+
+    async def _redact_viewport(self, page, image_path: Path) -> None:
+        capture_cfg = self.config.get("capture", {})
+        redact_cfg = capture_cfg.get("redact", {})
+        selectors = redact_cfg.get("selectors", [])
+        if not selectors or not redact_cfg.get("enabled", False):
+            return
+        try:
+            regions = await self._get_redaction_regions(page, selectors)
+        except Exception:
+            return
+        if regions:
+            redact_screenshot(image_path, regions, capture_cfg)
+
+    async def _get_redaction_regions(self, page, selectors: List[str]) -> List[Dict[str, float]]:
+        script = """
+        (selectors) => {
+          const out = [];
+          selectors.forEach((sel) => {
+            try {
+              document.querySelectorAll(sel).forEach((el) => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width && rect.height) {
+                  out.push({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+                }
+              });
+            } catch (err) {}
+          });
+          return out;
+        }
+        """
+        result = await page.evaluate(script, selectors)
+        return result or []
+
+    def _determine_significance(
+        self,
+        url: str,
+        has_modal: bool,
+        has_toast: bool,
+        form_validity: Optional[bool],
+        role_diff: Optional[float],
+        has_loader: bool,
+    ) -> Dict[str, Any]:
+        significance = "optional"
+        confidence = 0.5
+        reasoning: List[str] = []
+        previous_url = (self._previous_state or {}).get("url")
+        if url and url != previous_url:
+            path = urlparse(url).path or "/"
+            label = path.strip("/") or "home"
+            significance = "supporting"
+            confidence = 0.65
+            reasoning.append(f"Navigated to {label}")
+
+        if has_modal or has_toast:
+            significance = "critical"
+            confidence = 0.85
+            if has_modal:
+                reasoning.append("Modal dialog visible")
+            if has_toast:
+                reasoning.append("Toast/alert detected")
+        elif form_validity is True and not has_loader:
+            significance = "supporting"
+            confidence = 0.7
+            reasoning.append("Form validated successfully")
+        elif has_loader:
+            significance = "supporting"
+            confidence = 0.6
+            reasoning.append("Loading indicator detected")
+
+        if role_diff is not None and role_diff > 0.2 and significance != "critical":
+            significance = "supporting"
+            confidence = max(confidence, 0.65)
+            reasoning.append("Significant role-tree change")
+
+        if not reasoning:
+            reasoning.append("Stable navigation state")
+
+        return {
+            "significance": significance,
+            "significance_confidence": confidence,
+            "significance_reasoning": "; ".join(reasoning),
+        }
 
 

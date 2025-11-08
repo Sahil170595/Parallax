@@ -11,6 +11,7 @@ navigation:
   scroll_margin_px: 64
 
 capture:
+  multi_viewport: true
   desktop_viewport: { width: 1366, height: 832 }
   tablet_viewport: { width: 834, height: 1112 }
   mobile_viewport: { width: 390, height: 844 }
@@ -30,12 +31,17 @@ observer:
 output:
   base_dir: datasets
 
+completion:
+  min_targets: 1
+
 metrics:
   prometheus_port: 9109
 
 playwright:
   headless: true
   project: chromium  # chromium | firefox | webkit
+  # channel: chrome  # Optional: Use installed Chrome instead of Chromium (set to "chrome" to enable)
+  # user_data_dir: ~/.parallax/browser_data/linear  # Optional: Path to persistent browser context (saves cookies/sessions for authentication)
 
 vision:
   enabled: false  # Enable vision-based enhancements

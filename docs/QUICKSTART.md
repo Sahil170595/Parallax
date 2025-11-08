@@ -209,7 +209,21 @@ playwright:
   headless: false  # Default is true
 ```
 
-See [Configuration Reference](CONFIGURATION.md) for all options.
+**Use Chrome browser (recommended for authentication):**
+```yaml
+playwright:
+  project: chromium
+  channel: chrome  # Use installed Chrome instead of Chromium
+```
+
+**Enable authentication (for Linear, Notion, etc.):**
+```yaml
+playwright:
+  channel: chrome
+  user_data_dir: ~/.parallax/browser_data/linear  # After running: python authenticate.py linear
+```
+
+See [Configuration Reference](CONFIGURATION.md) for all options and [Authentication Guide](../../AUTHENTICATION.md) for authentication setup.
 
 ## Troubleshooting
 
@@ -248,6 +262,14 @@ navigation:
 ```bash
 python -m playwright install --with-deps
 ```
+
+### Authentication required
+
+**Solution:** For workflows requiring login (Linear, Notion, etc.):
+1. Run `python authenticate.py linear` (or `notion`, etc.)
+2. Log in manually in the opened browser
+3. Configure `user_data_dir` in `configs/config.yaml`
+4. See [Authentication Guide](../../AUTHENTICATION.md) for details
 
 ## Next Steps
 

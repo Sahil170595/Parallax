@@ -92,6 +92,25 @@ Actions:
 - click: {"action": "click", "role": "button", "name": "Create"} or {"action": "click", "selector": "button[data-testid='submit']"}
 - type: {"action": "type", "selector": "input[name='title']", "value": "My Title"}
 - submit: {"action": "submit", "selector": "form button[type='submit']"}
+- select: {"action": "select", "selector": "select[name='status']", "value": "active"} or {"action": "select", "selector": "select", "option_value": "option1"}
+- drag: {"action": "drag", "start_selector": "#item1", "end_selector": "#dropzone"} or {"action": "drag", "start_selector": "#item1", "target": "#dropzone"}
+- upload: {"action": "upload", "selector": "input[type='file']", "file_path": "/path/to/file.pdf"} or {"action": "upload", "selector": "input[type='file']", "value": "/path/to/file.pdf"}
+- hover: {"action": "hover", "selector": "button.menu", "role": "button", "name": "Menu"}
+- double_click: {"action": "double_click", "selector": "#item", "role": "button", "name": "Item"}
+- right_click: {"action": "right_click", "selector": "#context-menu", "role": "button"}
+- fill: {"action": "fill", "selector": "input[name='email']", "value": "user@example.com"}
+- check: {"action": "check", "selector": "input[type='checkbox']", "name": "Accept Terms"}
+- uncheck: {"action": "uncheck", "selector": "input[type='checkbox']", "name": "Newsletter"}
+- focus: {"action": "focus", "selector": "input[name='search']"}
+- blur: {"action": "blur", "selector": "input[name='search']"}
+- key_press: {"action": "key_press", "value": "Enter"} or {"action": "press_key", "value": "Escape"}
+- wait: {"action": "wait", "value": "2s"} or {"action": "wait", "value": "1000ms"}
+- scroll: {"action": "scroll", "value": "down"} or {"action": "scroll", "selector": "#section"}
+- go_back: {"action": "go_back"}
+- go_forward: {"action": "go_forward"}
+- reload: {"action": "reload"}
+- screenshot: {"action": "screenshot", "value": "screenshot.png"}
+- evaluate: {"action": "evaluate", "value": "document.title"}
 
 Selector priority: role+name > label > placeholder > data-testid > CSS selector.
 
@@ -188,6 +207,8 @@ When exploring, think about what a user would see on screen:
 - Main content links
 
 Generate a comprehensive plan that explores all visible navigation elements systematically.
+
+IMPORTANT: If a Start URL is provided in the task context, ALWAYS use that URL for navigation steps. Never use placeholder URLs like example.com unless explicitly requested.
 Generate a plan for the user task."""
         
         examples = [
@@ -201,6 +222,11 @@ Generate a plan for the user task."""
             }
         ]
         
+        # Build user message with context
+        user_message = task
+        if context.get("start_url"):
+            user_message = f"Task: {task}\nStart URL: {context['start_url']}\n\nIMPORTANT: Use the Start URL provided above for navigation steps. Do not use example.com or other placeholder URLs."
+        
         async with self.rate_limiter:
             try:
                 resp = await asyncio.wait_for(
@@ -209,7 +235,7 @@ Generate a plan for the user task."""
                         messages=[
                             {"role": "system", "content": system_prompt},
                             *examples,
-                            {"role": "user", "content": task},
+                            {"role": "user", "content": user_message},
                         ],
                         response_format={"type": "json_object"},
                         temperature=0.2,

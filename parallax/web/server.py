@@ -29,16 +29,21 @@ except ImportError:
 
 from parallax.core.config import ParallaxConfig
 from parallax.core.constitution import ConstitutionViolation, FailureStore
+from parallax.core.completion import CompletionValidationError, validate_completion
+from parallax.core.plan_overrides import apply_site_overrides
 from parallax.core.logging import configure_logging, get_logger
 from parallax.core.schemas import ExecutionPlan
+from parallax.agents.archivist import Archivist
 from parallax.agents.interpreter import Interpreter
 from parallax.agents.navigator import Navigator
 from parallax.agents.observer import Observer
-from parallax.observer.detectors import Detectors
-from parallax.agents.archivist import Archivist
-from parallax.llm.openai_provider import OpenAIPlanner
-from parallax.llm.local_provider import LocalPlanner
+from parallax.agents.strategy_generator import StrategyGenerator
+from parallax.core.metrics import ensure_metrics_server
 from parallax.core.trace import TraceController
+from parallax.observer.detectors import Detectors
+from parallax.llm.anthropic_provider import AnthropicPlanner
+from parallax.llm.local_provider import LocalPlanner
+from parallax.llm.openai_provider import OpenAIPlanner
 
 
 app = FastAPI(title="Parallax Web UI")
@@ -66,6 +71,8 @@ else:
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
+    cfg = _load_config()
+    ensure_metrics_server(cfg.metrics.prometheus_port)
     log.info("server_starting")
 
 @app.on_event("shutdown")
@@ -96,13 +103,21 @@ def _planner_from_config(cfg: ParallaxConfig):
     provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
         return OpenAIPlanner()
+    if provider == "anthropic":
+        return AnthropicPlanner()
     if provider == "local":
         return LocalPlanner()
-    # auto: prefer OpenAI, then Local
-    try:
-        return OpenAIPlanner()
-    except Exception:
-        return LocalPlanner()
+    planner_factories = (OpenAIPlanner, AnthropicPlanner, LocalPlanner)
+    last_error: Exception | None = None
+    for factory in planner_factories:
+        try:
+            return factory()
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("No LLM planner available")
 
 
 def _slugify(text: str) -> str:
@@ -303,7 +318,12 @@ async def run_task(request: TaskRequest):
         
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        interpreter = Interpreter(planner, failure_store=failure_store)
+        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        interpreter = Interpreter(
+            planner,
+            failure_store=failure_store,
+            strategy_generator=strategy_generator,
+        )
 
         vision_analyzer = None
         vision_enabled = cfg.vision.enabled
@@ -358,6 +378,7 @@ async def run_task(request: TaskRequest):
             })
 
             plan = await interpreter.plan(task, plan_context)
+            plan = apply_site_overrides(plan, start_url_current)
             
             # Log plan details for debugging
             log.info(
@@ -379,14 +400,63 @@ async def run_task(request: TaskRequest):
             async with async_playwright() as p:
                 browser_type = cfg.playwright.project
                 headless = cfg.playwright.headless
+                channel = cfg.playwright.channel
+                user_data_dir = cfg.playwright.user_data_dir
                 browser = None
                 context = None
                 tracer = None
                 trace_zip_path = None
                 try:
-                    browser = await getattr(p, browser_type).launch(headless=headless)
-                    context = await browser.new_context()
-                    page = await context.new_page()
+                    # Use persistent context if user_data_dir is specified (for authentication)
+                    if user_data_dir:
+                        from pathlib import Path
+                        user_data_path = Path(user_data_dir).expanduser().resolve()
+                        user_data_path.mkdir(parents=True, exist_ok=True)
+                        
+                        browser_launcher = getattr(p, browser_type)
+                        context_kwargs = {}
+                        if channel and browser_type == "chromium":
+                            context_kwargs["channel"] = channel
+                        if not headless:
+                            context_kwargs["headless"] = False
+                        
+                        # Chrome args to disable automation detection and security warnings
+                        if browser_type == "chromium":
+                            context_kwargs["args"] = [
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-dev-shm-usage",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                                "--disable-infobars",
+                            ]
+                            context_kwargs["viewport"] = {"width": 1920, "height": 1080}
+                            context_kwargs["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        
+                        # Create persistent context (saves cookies/sessions)
+                        context = await browser_launcher.launch_persistent_context(
+                            user_data_dir=str(user_data_path),
+                            **context_kwargs
+                        )
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        
+                        # Remove automation indicators from page
+                        await page.add_init_script("""
+                            Object.defineProperty(navigator, 'webdriver', {
+                                get: () => undefined
+                            });
+                            window.chrome = {
+                                runtime: {}
+                            };
+                        """)
+                    else:
+                        # Regular browser context
+                        browser_launcher = getattr(p, browser_type)
+                        launch_kwargs = {"headless": headless}
+                        if channel and browser_type == "chromium":
+                            launch_kwargs["channel"] = channel
+                        browser = await browser_launcher.launch(**launch_kwargs)
+                        context = await browser.new_context()
+                        page = await context.new_page()
 
                     # Merge observer and capture configs for Detectors
                     detector_config = cfg.observer.model_dump() if hasattr(cfg.observer, 'model_dump') else cfg.observer.dict()
@@ -427,6 +497,7 @@ async def run_task(request: TaskRequest):
                         vision_analyzer=vision_analyzer,
                         task_context=task,
                         progress_callback=progress_callback,
+                        strategy_generator=strategy_generator,
                     )
 
                     await manager.send_progress({
@@ -448,6 +519,11 @@ async def run_task(request: TaskRequest):
 
                     try:
                         nav_report = navigator.finalize(plan, nav_context)
+                        validate_completion(
+                            plan,
+                            observer.states,
+                            min_targets=cfg.completion.min_targets,
+                        )
                     except ConstitutionViolation as exc:
                         recovered, adjustments = await navigator.heal(plan, nav_context, exc.failures)
                         exc.recovery = {"recovered": recovered, "adjustments": adjustments}
@@ -1023,4 +1099,3 @@ def get_ui_html() -> str:
     </script>
 </body>
 </html>"""
-

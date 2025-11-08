@@ -19,6 +19,8 @@ except ImportError:
 
 from parallax.core.config import ParallaxConfig
 from parallax.core.constitution import ConstitutionViolation, FailureStore
+from parallax.core.completion import CompletionValidationError, validate_completion
+from parallax.core.plan_overrides import apply_site_overrides
 from parallax.core.logging import configure_logging, get_logger
 from rich.console import Console
 from rich.table import Table
@@ -26,13 +28,16 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, TaskProgressColumn
 from rich.markdown import Markdown
 from parallax.core.schemas import ExecutionPlan
+from parallax.agents.archivist import Archivist
 from parallax.agents.interpreter import Interpreter
 from parallax.agents.navigator import Navigator
 from parallax.agents.observer import Observer
-from parallax.observer.detectors import Detectors
-from parallax.agents.archivist import Archivist
-from parallax.llm.openai_provider import OpenAIPlanner
+from parallax.agents.strategy_generator import StrategyGenerator
+from parallax.llm.anthropic_provider import AnthropicPlanner
 from parallax.llm.local_provider import LocalPlanner
+from parallax.llm.openai_provider import OpenAIPlanner
+from parallax.observer.detectors import Detectors
+from parallax.core.metrics import ensure_metrics_server
 from parallax.core.trace import TraceController
 
 
@@ -57,7 +62,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 def _load_config() -> ParallaxConfig:
-    cfg_path = Path("configs/config.yaml")
+    cfg_path = Path(os.getenv("PARALLAX_CONFIG", "configs/config.yaml"))
     return ParallaxConfig.from_yaml(cfg_path)
 
 
@@ -65,17 +70,35 @@ def _planner_from_config(cfg: ParallaxConfig):
     provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
         return OpenAIPlanner()
+    if provider == "anthropic":
+        return AnthropicPlanner()
     if provider == "local":
         return LocalPlanner()
-    # auto: prefer OpenAI, then Local
-    try:
-        return OpenAIPlanner()
-    except Exception:
-        return LocalPlanner()
+    # auto: prefer OpenAI, Anthropic, then Local
+    planner_factories = (OpenAIPlanner, AnthropicPlanner, LocalPlanner)
+    last_error: Exception | None = None
+    for factory in planner_factories:
+        try:
+            return factory()
+        except Exception as exc:  # pragma: no cover - depends on env config
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("No LLM planner available")
 
 
 @app.command()
-def run(task: str, app_name: str = "linear", start_url: str = "https://linear.app") -> None:
+def run(
+    task: str,
+    app_name: str = "linear",
+    start_url: str = "https://linear.app",
+    multi_viewport: Optional[bool] = typer.Option(
+        None,
+        "--multi-viewport/--single-viewport",
+        help="Capture tablet/mobile screenshots in addition to desktop (default from config).",
+    ),
+) -> None:
     """Run a Parallax workflow for a natural-language task."""
 
     async def _main():
@@ -93,11 +116,19 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
         console.print("\n")
         
         cfg = _load_config()
+        if multi_viewport is not None:
+            cfg.capture.multi_viewport = multi_viewport
+        ensure_metrics_server(cfg.metrics.prometheus_port)
         planner = _planner_from_config(cfg)
 
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        interpreter = Interpreter(planner, failure_store=failure_store)
+        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        interpreter = Interpreter(
+            planner,
+            failure_store=failure_store,
+            strategy_generator=strategy_generator,
+        )
         
         # Initialize vision analyzer if enabled
         vision_analyzer = None
@@ -148,15 +179,68 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
 
             with console.status("[bold cyan]Planning workflow...", spinner="dots"):
                 plan = await interpreter.plan(task, plan_context)
+                plan = apply_site_overrides(plan, start_url_current)
 
             console.print(f"[green]✓[/green] Generated [bold]{len(plan.steps)}[/bold] steps")
 
             async with async_playwright() as p:
                 browser_type = cfg.playwright.project
                 headless = cfg.playwright.headless
-                browser = await getattr(p, browser_type).launch(headless=headless)
-                context = await browser.new_context()
-                page = await context.new_page()
+                channel = cfg.playwright.channel
+                user_data_dir = cfg.playwright.user_data_dir
+                
+                browser = None  # Will be None for persistent contexts
+                
+                # Use persistent context if user_data_dir is specified (for authentication)
+                if user_data_dir:
+                    from pathlib import Path
+                    user_data_path = Path(user_data_dir).expanduser().resolve()
+                    user_data_path.mkdir(parents=True, exist_ok=True)
+                    
+                    browser_launcher = getattr(p, browser_type)
+                    context_kwargs = {}
+                    if channel and browser_type == "chromium":
+                        context_kwargs["channel"] = channel
+                    if not headless:
+                        context_kwargs["headless"] = False
+                    
+                    # Chrome args to disable automation detection and security warnings
+                    if browser_type == "chromium":
+                        context_kwargs["args"] = [
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                            "--no-first-run",
+                            "--no-default-browser-check",
+                            "--disable-infobars",
+                        ]
+                        context_kwargs["viewport"] = {"width": 1920, "height": 1080}
+                        context_kwargs["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    
+                    # Create persistent context (saves cookies/sessions)
+                    context = await browser_launcher.launch_persistent_context(
+                        user_data_dir=str(user_data_path),
+                        **context_kwargs
+                    )
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    
+                    # Remove automation indicators from page
+                    await page.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined
+                        });
+                        window.chrome = {
+                            runtime: {}
+                        };
+                    """)
+                else:
+                    # Regular browser context
+                    browser_launcher = getattr(p, browser_type)
+                    launch_kwargs = {"headless": headless}
+                    if channel and browser_type == "chromium":
+                        launch_kwargs["channel"] = channel
+                    browser = await browser_launcher.launch(**launch_kwargs)
+                    context = await browser.new_context()
+                    page = await context.new_page()
 
                 # Merge observer and capture configs for Detectors
                 detector_config = cfg.observer.model_dump() if hasattr(cfg.observer, 'model_dump') else cfg.observer.dict()
@@ -207,6 +291,7 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                         vision_analyzer=vision_analyzer,
                         task_context=task,
                         progress_callback=progress_callback,
+                        strategy_generator=strategy_generator,
                     )
 
                     try:
@@ -233,13 +318,26 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                     with console.status("[bold cyan]Saving trace...", spinner="dots"):
                         await tracer.stop(trace_zip_path)
                     await context.close()
-                    await browser.close()
+                    if browser:
+                        await browser.close()
                     raise
 
                 if nav_report.warnings:
                     console.print("[yellow]⚠ Navigation warnings[/yellow]")
                     for warning in nav_report.warnings:
                         console.print(f"  [yellow]-[/yellow] {warning.rule_name}: {warning.reason}")
+
+                try:
+                    validate_completion(
+                        plan,
+                        observer.states,
+                        min_targets=cfg.completion.min_targets,
+                    )
+                except CompletionValidationError as exc:
+                    console.print("\n[red]❌ Completion validation failed[/red]")
+                    for item in exc.missing:
+                        console.print(f"  [red]-[/red] Missing navigation: {item}")
+                    raise
 
                 arch = Archivist(datasets_dir, failure_store=failure_store)
 
@@ -280,7 +378,8 @@ def run(task: str, app_name: str = "linear", start_url: str = "https://linear.ap
                 log.info("dataset_saved", path=str(root), states=len(observer.states))
 
                 await context.close()
-                await browser.close()
+                if browser:
+                    await browser.close()
 
         last_failure: ConstitutionViolation | None = None
         for attempt in range(total_runs):

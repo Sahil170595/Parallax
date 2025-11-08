@@ -126,6 +126,8 @@ metrics:
 playwright:
   headless: true
   project: chromium  # chromium | firefox | webkit
+  # channel: chrome  # Optional: Use installed Chrome instead of Chromium (set to "chrome" to enable)
+  # user_data_dir: ~/.parallax/browser_data/linear  # Optional: Path to persistent browser context (saves cookies/sessions for authentication)
 ```
 
 **Options:**
@@ -134,6 +136,14 @@ playwright:
   - `chromium` - Chromium browser
   - `firefox` - Firefox browser
   - `webkit` - WebKit browser
+- `channel`: Browser channel (optional)
+  - `chrome` - Use installed Chrome browser instead of Chromium (better compatibility, recommended for authentication)
+  - Only works with `project: chromium`
+- `user_data_dir`: Path to persistent browser context (optional)
+  - Saves cookies, localStorage, and session data
+  - Enables authentication workflows
+  - Example: `~/.parallax/browser_data/linear`
+  - See [Authentication Guide](../../AUTHENTICATION.md) for setup instructions
 
 ---
 
@@ -253,6 +263,8 @@ metrics:
 playwright:
   headless: false
   project: chromium
+  channel: chrome  # Use installed Chrome for better compatibility
+  # user_data_dir: ~/.parallax/browser_data/myapp  # Enable for authenticated workflows
 
 vision:
   enabled: true
@@ -349,6 +361,37 @@ Switch between browsers:
 playwright:
   project: chromium  # or firefox | webkit
 ```
+
+### Chrome Channel Support
+
+Use installed Chrome browser for better compatibility and authentication:
+
+```yaml
+playwright:
+  project: chromium
+  channel: chrome  # Use installed Chrome instead of Chromium
+```
+
+**Benefits:**
+- Better compatibility with websites
+- Improved authentication support
+- More realistic browser fingerprint
+
+### Persistent Context for Authentication
+
+Save browser sessions for authenticated workflows:
+
+```yaml
+playwright:
+  user_data_dir: ~/.parallax/browser_data/linear
+```
+
+**Setup:**
+1. Run `python authenticate.py linear` to log in once
+2. Configure `user_data_dir` in `config.yaml`
+3. Your workflows will use the saved session
+
+See [Authentication Guide](../../AUTHENTICATION.md) for detailed instructions.
 
 ---
 

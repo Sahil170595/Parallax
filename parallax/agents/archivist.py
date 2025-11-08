@@ -98,6 +98,7 @@ class Archivist:
             "app": app,
             "task_slug": task_slug,
             "states_count": len(states_list),
+            "min_states": 1,
         }
         report = self.constitution.validate(states_list, root, validation_context)
         

@@ -62,3 +62,29 @@ async def test_screenshot_mobile_restores_or_falls_back(tmp_path):
     assert page.set_calls[0] == {"width": 390, "height": 844}
     assert page.set_calls[-1] == {"width": 1366, "height": 832}
     assert page.viewport_size == {"width": 1366, "height": 832}
+
+
+def test_significance_heuristics():
+    detectors = Detectors({})
+    info = detectors._determine_significance(
+        url="https://example.com/product",
+        has_modal=True,
+        has_toast=False,
+        form_validity=None,
+        role_diff=None,
+        has_loader=False,
+    )
+    assert info["significance"] == "critical"
+    assert "Modal" in info["significance_reasoning"]
+
+    detectors._previous_state = {"url": "https://example.com"}
+    info = detectors._determine_significance(
+        url="https://example.com/pricing",
+        has_modal=False,
+        has_toast=False,
+        form_validity=None,
+        role_diff=None,
+        has_loader=False,
+    )
+    assert info["significance"] == "supporting"
+    assert "Navigated" in info["significance_reasoning"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from parallax.agents.constitutions import INTERPRETER_CONSTITUTION
+from parallax.agents.strategy_generator import StrategyGenerator
 from parallax.core.constitution import FailureStore
 from parallax.core.logging import get_logger
 from parallax.core.metrics import llm_tokens
@@ -34,9 +35,15 @@ class Interpreter:
         >>> print(f"Generated {len(plan.steps)} steps")
     """
     
-    def __init__(self, provider: "PlannerProvider", failure_store: Optional[FailureStore] = None) -> None:
+    def __init__(
+        self,
+        provider: "PlannerProvider",
+        failure_store: Optional[FailureStore] = None,
+        strategy_generator: Optional[StrategyGenerator] = None,
+    ) -> None:
         self.provider = provider
         self.failure_store = failure_store
+        self.strategy_generator = strategy_generator
         self.constitution = INTERPRETER_CONSTITUTION
 
     async def plan(self, task: str, context: Optional[dict] = None) -> ExecutionPlan:
@@ -63,6 +70,17 @@ class Interpreter:
             ...     print(f"{step.action}: {step.selector or step.name}")
         """
         context = context or {}
+        
+        # Enhance context with strategies if available
+        if self.strategy_generator:
+            failure_patterns = self.strategy_generator.analyze_failures(limit=20)
+            if failure_patterns:
+                context = {
+                    **context,
+                    "failure_patterns": failure_patterns,
+                    "use_strategies": True,
+                }
+        
         plan = await self.provider.generate_plan(task, context)
         
         # Estimate tokens (rough: 1 token ≈ 4 chars)
