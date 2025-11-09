@@ -77,11 +77,11 @@ All 5 scenarios were executed successfully. Here are the results:
 Each scenario can be run independently:
 
 ```bash
-python test_scenario_01_example_com.py      # ✅ Works perfectly
-python test_scenario_02_wikipedia.py        # ✅ Works perfectly (fixed)
-python test_scenario_03_linear_create.py    # ⚠️ Requires authentication
-python test_scenario_04_notion_create.py    # ⚠️ Requires authentication
-python test_scenario_05_linear_filter.py    # ⚠️ Requires authentication
+python demos/test_scenario_01_example_com.py      # ✅ Works perfectly
+python demos/test_scenario_02_wikipedia.py        # ✅ Works perfectly (fixed)
+python demos/test_scenario_03_linear_create.py    # ⚠️ Requires authentication
+python demos/test_scenario_04_notion_create.py    # ⚠️ Requires authentication
+python demos/test_scenario_05_linear_filter.py    # ⚠️ Requires authentication
 ```
 
 ## Next Steps

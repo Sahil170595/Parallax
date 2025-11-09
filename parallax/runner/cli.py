@@ -6,6 +6,7 @@ import signal
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import typer
 import yaml
@@ -88,11 +89,27 @@ def _planner_from_config(cfg: ParallaxConfig):
     raise RuntimeError("No LLM planner available")
 
 
+def _validate_url(url: str) -> str:
+    """Validate URL has scheme and netloc."""
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise typer.BadParameter(
+            f"Invalid URL: '{url}'. URL must include scheme (http:// or https://). "
+            f"Example: 'https://example.com'"
+        )
+    return url
+
+
 @app.command()
 def run(
     task: str,
     app_name: str = "linear",
-    start_url: str = "https://linear.app",
+    start_url: str = typer.Option(
+        "https://linear.app",
+        "--start-url",
+        callback=_validate_url,
+        help="Starting URL for the workflow (must include http:// or https://)",
+    ),
     multi_viewport: Optional[bool] = typer.Option(
         None,
         "--multi-viewport/--single-viewport",
@@ -123,7 +140,10 @@ def run(
 
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        strategy_generator = StrategyGenerator(
+            failure_store=failure_store,
+            strategies_file=datasets_dir / "_strategies" / "strategies.json"
+        )
         interpreter = Interpreter(
             planner,
             failure_store=failure_store,

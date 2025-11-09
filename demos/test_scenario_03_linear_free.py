@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Create a new page in Notion"""
+"""Test scenario: Explore Linear's public website (free, no auth required)"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Create a new page in Notion",
+        "Explore Linear's website and navigate through the main pages",
         "--app-name",
-        "notion",
+        "linear",
         "--start-url",
-        "https://notion.so",
+        "https://linear.app",
     ]
     
     env = os.environ.copy()

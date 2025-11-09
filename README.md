@@ -120,6 +120,20 @@ Open `report.html` in your browser to see:
 - Metadata (modals, toasts, forms)
 - Action descriptions
 
+### Immersive Demo Dashboard
+
+For a cinematic, end-to-end walkthrough inspired by the best Streamlit gallery and Observable notebook demos, run the new showcase dashboard:
+
+```bash
+streamlit run immersive_dashboard.py
+```
+
+This dashboard lets you:
+- Select any dataset captured by Parallax
+- View a hero summary with milestones, modals, and toasts
+- Explore a Plotly-powered timeline, storyboard filmstrip, and deep-dive inspector
+- Embed the original HTML report without leaving the app
+
 ## Production-Ready Features
 
 Parallax includes enterprise-grade features for production deployments:

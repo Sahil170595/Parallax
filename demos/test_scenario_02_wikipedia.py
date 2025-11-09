@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Create a project in Linear"""
+"""Test scenario: Search for Python programming language on Wikipedia"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Create a project in Linear",
+        "Search for Python programming language",
         "--app-name",
-        "linear",
+        "wikipedia",
         "--start-url",
-        "https://linear.app",
+        "https://wikipedia.org",
     ]
     
     env = os.environ.copy()
@@ -28,6 +28,7 @@ if __name__ == "__main__":
         env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     
     subprocess.run(cmd, env=env)
+
 
 
 

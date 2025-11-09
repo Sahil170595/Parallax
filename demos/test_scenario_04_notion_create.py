@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Filter issues by status in Linear"""
+"""Test scenario: Create a new page in Notion"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Filter issues by status",
+        "Create a new page in Notion",
         "--app-name",
-        "linear",
+        "notion",
         "--start-url",
-        "https://linear.app",
+        "https://notion.so",
     ]
     
     env = os.environ.copy()
@@ -28,6 +28,7 @@ if __name__ == "__main__":
         env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     
     subprocess.run(cmd, env=env)
+
 
 
 

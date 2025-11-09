@@ -310,6 +310,15 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
     """Execute a task and show real-time progress."""
     ensure_metrics_server(cfg.metrics.prometheus_port)
     
+    app_label = (app_name or "").strip()
+    if not app_label:
+        st.error("Please provide an app name before running a workflow.")
+        return
+
+    app_dir_name = slugify(app_label)
+    if not app_dir_name:
+        app_dir_name = "app"
+    
     progress_container = st.container()
     status_container = st.container()
     plan_container = st.container()
@@ -325,7 +334,10 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
         planner = planner_from_config(cfg)
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        strategy_generator = StrategyGenerator(
+            failure_store=failure_store,
+            strategies_file=datasets_dir / "_strategies" / "strategies.json"
+        )
         interpreter = Interpreter(
             planner,
             failure_store=failure_store,
@@ -434,7 +446,7 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                     detector_config["capture"] = cfg.capture.model_dump() if hasattr(cfg.capture, 'model_dump') else cfg.capture.dict()
                     detectors = Detectors(detector_config)
                     slug = slugify(task)
-                    task_dir = datasets_dir / app_name / slug
+                    task_dir = datasets_dir / app_dir_name / slug
                     task_dir.mkdir(parents=True, exist_ok=True)
                     
                     observer = Observer(
@@ -498,7 +510,7 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                         
                         # Save dataset
                         archivist = Archivist(datasets_dir, failure_store=failure_store)
-                        root = archivist.write_states(app_name, slug, observer.states, trace_zip="trace.zip")
+                        root = archivist.write_states(app_dir_name, slug, observer.states, trace_zip="trace.zip")
                         
                         return root, observer.states
                     finally:
@@ -593,7 +605,9 @@ def show_datasets_page():
                 st.metric("Has Database", "✅" if dataset["has_db"] else "❌")
             
             # Load and display states
-            if st.button(f"View Details", key=f"view_{dataset['task']}"):
+            # Use a unique key based on app and task to avoid duplicates
+            button_key = f"view_{dataset['app']}_{dataset['task']}".replace(" ", "_").replace("/", "_").replace("-", "_")
+            if st.button(f"View Details", key=button_key):
                 view_dataset_details(Path(dataset["path"]))
 
 

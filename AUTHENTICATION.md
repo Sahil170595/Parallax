@@ -48,8 +48,8 @@ config["playwright"]["user_data_dir"] = str(Path.home() / ".parallax" / "browser
 Now your workflows will use the authenticated session:
 
 ```bash
-python test_scenario_03_linear_create_chrome.py
-python test_scenario_04_notion_create_chrome.py
+python demos/test_scenario_03_linear_create_chrome.py
+python demos/test_scenario_04_notion_create_chrome.py
 ```
 
 ## How It Works
@@ -121,7 +121,7 @@ python authenticate.py linear
 #    user_data_dir: ~/.parallax/browser_data/linear
 
 # 3. Run your workflow
-python test_scenario_03_linear_create_chrome.py
+python demos/test_scenario_03_linear_create_chrome.py
 ```
 
 Your workflow will now run authenticated! 🎉

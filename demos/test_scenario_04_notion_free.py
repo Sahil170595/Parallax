@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Navigate to example.com and show the page"""
+"""Test scenario: Explore Notion's public website (free, no auth required)"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Navigate to example.com and show the page",
+        "Explore Notion's website and navigate through the main pages",
         "--app-name",
-        "demo",
+        "notion",
         "--start-url",
-        "https://example.com",
+        "https://notion.so",
     ]
     
     env = os.environ.copy()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -57,7 +57,7 @@ class ValidationFailure:
     level: ValidationLevel
     reason: str
     details: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     agent: str = ""
     context: Dict[str, Any] = field(default_factory=dict)
 
@@ -69,7 +69,7 @@ class ConstitutionReport:
     passed: bool
     failures: List[ValidationFailure] = field(default_factory=list)
     warnings: List[ValidationFailure] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     context: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

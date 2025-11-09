@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Explore Linear's public website (free, no auth required)"""
+"""Test scenario: Filter issues by status in Linear"""
 
 import sys
 import os
@@ -15,7 +15,7 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Explore Linear's website and navigate through the main pages",
+        "Filter issues by status",
         "--app-name",
         "linear",
         "--start-url",
@@ -28,5 +28,7 @@ if __name__ == "__main__":
         env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     
     subprocess.run(cmd, env=env)
+
+
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Explore Notion's public website (free, no auth required)"""
+"""Test scenario: Create a project in Linear"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Explore Notion's website and navigate through the main pages",
+        "Create a project in Linear",
         "--app-name",
-        "notion",
+        "linear",
         "--start-url",
-        "https://notion.so",
+        "https://linear.app",
     ]
     
     env = os.environ.copy()
@@ -28,5 +28,7 @@ if __name__ == "__main__":
         env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     
     subprocess.run(cmd, env=env)
+
+
 
 

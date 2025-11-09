@@ -1,6 +1,6 @@
 # Usage Scenario Test Files
 
-This directory contains individual test files for each usage scenario from the documentation.
+The demo scripts now live in the `demos/` directory and contain individual test files for each usage scenario from the documentation.
 
 ## Test Files
 
@@ -16,22 +16,22 @@ This directory contains individual test files for each usage scenario from the d
 
 ## Usage
 
-Run each scenario individually:
+Run each scenario individually (from the repo root) using the scripts in `demos/`:
 
 ```bash
 # Windows
-python test_scenario_01_example_com.py
-python test_scenario_02_wikipedia.py
-python test_scenario_03_linear_create.py
-python test_scenario_04_notion_create.py
-python test_scenario_05_linear_filter.py
+python demos/test_scenario_01_example_com.py
+python demos/test_scenario_02_wikipedia.py
+python demos/test_scenario_03_linear_create.py
+python demos/test_scenario_04_notion_create.py
+python demos/test_scenario_05_linear_filter.py
 
 # Linux/Mac
-python3 test_scenario_01_example_com.py
-python3 test_scenario_02_wikipedia.py
-python3 test_scenario_03_linear_create.py
-python3 test_scenario_04_notion_create.py
-python3 test_scenario_05_linear_filter.py
+python3 demos/test_scenario_01_example_com.py
+python3 demos/test_scenario_02_wikipedia.py
+python3 demos/test_scenario_03_linear_create.py
+python3 demos/test_scenario_04_notion_create.py
+python3 demos/test_scenario_05_linear_filter.py
 ```
 
 ## Notes

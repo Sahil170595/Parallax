@@ -56,7 +56,10 @@ active_tasks: set[asyncio.Task] = set()
 
 def signal_handler(sig: int, frame) -> None:
     """Handle shutdown signals gracefully."""
-    signal_name = signal.Signals(sig).name if hasattr(signal.Signals, sig) else str(sig)
+    try:
+        signal_name = signal.Signals(sig).name
+    except (ValueError, AttributeError):
+        signal_name = str(sig)
     log.info("shutdown_signal_received", signal=signal_name)
     shutdown_event.set()
 
@@ -318,7 +321,10 @@ async def run_task(request: TaskRequest):
         
         datasets_dir = Path(cfg.output.base_dir)
         failure_store = FailureStore(datasets_dir / "_constitution_failures")
-        strategy_generator = StrategyGenerator(failure_store=failure_store)
+        strategy_generator = StrategyGenerator(
+            failure_store=failure_store,
+            strategies_file=datasets_dir / "_strategies" / "strategies.json"
+        )
         interpreter = Interpreter(
             planner,
             failure_store=failure_store,

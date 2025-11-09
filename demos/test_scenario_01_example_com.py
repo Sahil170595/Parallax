@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test scenario: Search for Python programming language on Wikipedia"""
+"""Test scenario: Navigate to example.com and show the page"""
 
 import sys
 import os
@@ -15,11 +15,11 @@ if __name__ == "__main__":
         sys.executable,
         "-m",
         "parallax.runner.cli",
-        "Search for Python programming language",
+        "Navigate to example.com and show the page",
         "--app-name",
-        "wikipedia",
+        "demo",
         "--start-url",
-        "https://wikipedia.org",
+        "https://example.com",
     ]
     
     env = os.environ.copy()
@@ -28,6 +28,7 @@ if __name__ == "__main__":
         env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     
     subprocess.run(cmd, env=env)
+
 
 
 

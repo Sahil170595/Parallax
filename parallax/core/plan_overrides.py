@@ -7,7 +7,9 @@ def apply_site_overrides(plan: ExecutionPlan, start_url: str | None) -> Executio
     """Mutate plan steps to account for known site quirks."""
     if not start_url:
         return plan
-    lowered = start_url.lower()
+    # Convert HttpUrl to string if needed (from Pydantic validation)
+    start_url_str = str(start_url)
+    lowered = start_url_str.lower()
     if "wikipedia.org" in lowered:
         _tune_wikipedia_plan(plan)
     return plan
