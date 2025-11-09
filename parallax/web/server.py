@@ -351,7 +351,8 @@ async def run_task(request: TaskRequest):
         total_runs = 1 + heal_attempts
         slug = _slugify(task)
 
-        start_url_current = start_url
+        # Convert HttpUrl to string for consistency
+        start_url_current = str(start_url)
         action_budget_override: Optional[int] = None
         plan_context_overrides: Dict[str, Any] = {}
         failure_history: list[Dict[str, Any]] = []
@@ -633,7 +634,8 @@ async def run_task(request: TaskRequest):
                     })
 
                 if adjustments.get("start_url"):
-                    start_url_current = adjustments["start_url"]
+                    # Ensure start_url is a string (may come from navigator.heal)
+                    start_url_current = str(adjustments["start_url"])
 
                 plan_ctx = dict(adjustments.get("plan_context", {}))
                 plan_ctx.pop("failure_history", None)

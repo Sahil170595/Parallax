@@ -2,6 +2,7 @@
 Beautiful Streamlit Dashboard for Parallax Workflow Visualization
 """
 import asyncio
+import hashlib
 import json
 import sqlite3
 import sys
@@ -591,7 +592,7 @@ def show_datasets_page():
     st.metric("Total Datasets", len(filtered_datasets))
     
     # Display datasets
-    for dataset in filtered_datasets:
+    for idx, dataset in enumerate(filtered_datasets):
         with st.expander(f"📦 {dataset['app']}/{dataset['task']} ({dataset['states_count']} states)"):
             col1, col2, col3 = st.columns(3)
             
@@ -605,8 +606,9 @@ def show_datasets_page():
                 st.metric("Has Database", "✅" if dataset["has_db"] else "❌")
             
             # Load and display states
-            # Use a unique key based on app and task to avoid duplicates
-            button_key = f"view_{dataset['app']}_{dataset['task']}".replace(" ", "_").replace("/", "_").replace("-", "_")
+            # Use index and path hash to ensure unique keys
+            path_hash = hashlib.md5(dataset["path"].encode()).hexdigest()[:8]
+            button_key = f"view_{idx}_{path_hash}"
             if st.button(f"View Details", key=button_key):
                 view_dataset_details(Path(dataset["path"]))
 
