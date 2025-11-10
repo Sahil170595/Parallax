@@ -51,3 +51,4 @@ All notable changes to Parallax will be documented in this file.
 - Contributing guidelines
 
 
+
