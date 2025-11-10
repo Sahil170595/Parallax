@@ -120,15 +120,31 @@ def validate_navigation_success(input_data: ExecutionPlan, output_data: Any, con
     if not page:
         return True, "No page context to validate", {}
     
-    # Check if page is still valid (not crashed)
+    # Check if page is still valid (not crashed or closed)
     try:
+        # Try to access the URL - if this fails, the page is likely crashed or closed
         url = page.url
-        # Check if page loaded successfully
-        if not url or url == "about:blank":
-            return False, "Page did not load properly", {"url": url}
+        
+        # Check if we have a valid URL
+        # Allow data: and blob: URLs as they are valid
+        if not url:
+            return False, "Page did not load properly (empty URL)", {"url": url}
+        
+        # Only fail on "about:blank" if we actually executed navigation steps
+        # If the plan has navigation steps, we should have navigated away from about:blank
+        has_navigation = any(step.action == "navigate" for step in input_data.steps)
+        if url == "about:blank" and has_navigation:
+            return False, "Page did not load properly (still on about:blank after navigation)", {"url": url}
+        
+        # If we have a valid URL (not about:blank, or about:blank but no navigation was expected)
         return True, "Navigation successful", {"final_url": url}
     except Exception as e:
-        return False, f"Page navigation failed: {str(e)}", {"error": str(e)}
+        # If accessing page.url raises an exception, the page is likely crashed or closed
+        error_msg = str(e)
+        if "Target closed" in error_msg or "Target page, context or browser has been closed" in error_msg:
+            return False, "Page was closed or crashed", {"error": error_msg}
+        # Return failure for unexpected exceptions
+        return False, f"Page navigation failed: {error_msg}", {"error": error_msg}
 
 
 def validate_action_budget(input_data: ExecutionPlan, output_data: Any, context: Dict) -> tuple[bool, str, Dict]:

@@ -1,6 +1,6 @@
 provider: auto  # openai | anthropic | local | auto
 planner:
-  max_tokens: 1200
+  max_tokens: 2000  # Increased for complex workflows
   temperature: 0.2
   timeout_ms: 10000
 
@@ -44,6 +44,6 @@ playwright:
   # user_data_dir: ~/.parallax/browser_data/linear  # Optional: Path to persistent browser context (saves cookies/sessions for authentication)
 
 vision:
-  enabled: false  # Enable vision-based enhancements
+  enabled: true  # Enable vision-based enhancements (fallback for hard-to-locate elements)
   provider: openai  # openai | anthropic
 

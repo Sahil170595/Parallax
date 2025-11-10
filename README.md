@@ -13,7 +13,7 @@ Parallax executes natural-language web tasks end-to-end using Playwright and a p
 - 🤖 **Multi-Agent System:** Four agents (Interpreter, Navigator, Observer, Archivist) work together
 - 🎯 **Non-URL State Detection:** Captures modals, toasts, forms, and async transitions
 - 📸 **Multi-Viewport Capture:** Desktop, tablet, and mobile screenshots
-- 🧠 **Vision-Based Enhancements:** Optional vision LLM support for completion detection and element location
+- 🧠 **Vision-Based Enhancements:** Vision LLM enabled by default for element location fallback (gpt-4o-mini)
 - 🏛️ **Constitution System:** Quality gates ensure reliable outputs
 - 📊 **Rich Outputs:** JSONL, SQLite, HTML reports with timeline
 - 🔄 **Production-Ready:** Retry logic, rate limiting, timeout handling, error recovery
@@ -89,12 +89,12 @@ python -m parallax.runner.cli run "Search for Python programming language" --app
 
 Edit `configs/config.yaml` to customize:
 
-- **LLM Provider:** `openai`, `anthropic`, `local`, or `auto`
-- **Navigation:** Action budget, wait times, retry attempts
+- **LLM Provider:** `openai` (default: gpt-4.1-mini), `anthropic`, `local`, or `auto`
+- **Navigation:** Action budget (default: 30), wait times, retry attempts
 - **Observer:** Detection thresholds, viewport settings
-- **Vision:** Enable/disable vision features
+- **Vision:** Enabled by default for element location fallback (gpt-4o-mini)
 
-See [Configuration Guide](docs/USAGE.md#configuration) for details.
+See [Configuration Guide](docs/CONFIGURATION.md) for details.
 
 ## Outputs
 
@@ -120,19 +120,33 @@ Open `report.html` in your browser to see:
 - Metadata (modals, toasts, forms)
 - Action descriptions
 
+### Streamlit Dashboard
+
+Run the interactive dashboard for workflow management:
+
+```bash
+streamlit run streamlit_dashboard.py
+```
+
+**Features:**
+- Run new workflows with natural language tasks
+- View existing datasets with timeline visualization
+- Analytics and metrics dashboard
+- Download datasets (JSONL, SQLite, HTML reports)
+
 ### Immersive Demo Dashboard
 
-For a cinematic, end-to-end walkthrough inspired by the best Streamlit gallery and Observable notebook demos, run the new showcase dashboard:
+For a cinematic, end-to-end walkthrough, run the immersive dashboard:
 
 ```bash
 streamlit run immersive_dashboard.py
 ```
 
-This dashboard lets you:
-- Select any dataset captured by Parallax
-- View a hero summary with milestones, modals, and toasts
-- Explore a Plotly-powered timeline, storyboard filmstrip, and deep-dive inspector
-- Embed the original HTML report without leaving the app
+**Features:**
+- Hero summary with milestones, modals, and toasts
+- Plotly-powered timeline and storyboard filmstrip
+- Deep-dive inspector for each state
+- Embedded HTML reports
 
 ## Production-Ready Features
 
@@ -183,8 +197,10 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for details.
 - **[Configuration Reference](docs/CONFIGURATION.md)** - Complete configuration options
 - **[Architecture](docs/ARCHITECTURE.md)** - System design and architecture
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Common issues and solutions 🔧
 - **[Authentication Guide](AUTHENTICATION.md)** - Setting up authenticated workflows 🔐
 - **[Contributing](CONTRIBUTING.md)** - Guidelines for contributing
+- **[Changelog](CHANGELOG.md)** - Version history
 
 ## Development
 
@@ -228,11 +244,13 @@ Parallax detects UI state changes without relying on URL changes:
 
 ### Vision-Based Enhancements
 
-Optional vision LLM support for:
+Vision LLM enabled by default (gpt-4o-mini) for:
 
+- **Element Location:** Visual fallback when normal selectors fail (primary use)
 - **Completion Detection:** Early termination when workflow is complete
 - **State Significance:** Categorizes states as critical/supporting/optional
-- **Element Location:** Visual fallback when selectors fail
+
+**Note:** Vision only triggers when normal selectors fail, adding ~1-2s per vision call.
 
 ### Constitution System
 

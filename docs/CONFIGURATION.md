@@ -13,23 +13,22 @@ Configuration is stored in `configs/config.yaml`. The file is loaded automatical
 ### LLM Provider
 
 ```yaml
-llm:
-  provider: auto  # openai | anthropic | local | auto
-  planner:
-    max_tokens: 1200
-    temperature: 0.2
-    timeout_ms: 10000
+provider: auto  # openai | anthropic | local | auto
+planner:
+  max_tokens: 2000  # Increased for complex workflows
+  temperature: 0.2
+  timeout_ms: 10000
 ```
 
 **Options:**
 - `provider`: LLM provider to use
-  - `openai` - OpenAI GPT models (requires `OPENAI_API_KEY`)
+  - `openai` - OpenAI GPT models (default: gpt-4.1-mini, requires `OPENAI_API_KEY`)
   - `anthropic` - Anthropic Claude models (requires `ANTHROPIC_API_KEY`)
   - `local` - Local LLM (Ollama, vLLM, etc.)
   - `auto` - Automatically select based on available API keys
 
-- `planner.max_tokens`: Maximum tokens for plan generation (default: 1200)
-- `planner.temperature`: Temperature for plan generation (default: 0.2)
+- `planner.max_tokens`: Maximum tokens for plan generation (default: 2000, increased for complex workflows)
+- `planner.temperature`: Temperature for plan generation (default: 0.2, low for deterministic output)
 - `planner.timeout_ms`: Timeout for LLM requests in milliseconds (default: 10000)
 
 ---
@@ -151,14 +150,17 @@ playwright:
 
 ```yaml
 vision:
-  enabled: false  # Enable vision-based enhancements
+  enabled: true  # Enable vision-based enhancements (fallback for hard-to-locate elements)
   provider: openai  # openai | anthropic
 ```
 
 **Options:**
-- `enabled`: Enable vision-based enhancements (default: false)
+- `enabled`: Enable vision-based enhancements (default: true)
+  - When enabled, uses vision LLM as fallback when normal selectors fail
+  - Provides visual element location for hard-to-find elements
+  - Adds ~1-2s per vision call, only triggers on selector failures
 - `provider`: Vision LLM provider (default: `openai`)
-  - `openai` - OpenAI vision models (requires `OPENAI_API_KEY`)
+  - `openai` - OpenAI vision models (default: gpt-4o-mini, requires `OPENAI_API_KEY`)
   - `anthropic` - Anthropic vision models (requires `ANTHROPIC_API_KEY`)
 
 **Vision Features:**

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 class PlannerConfig(BaseModel):
     """LLM planner configuration."""
-    max_tokens: int = Field(default=1200, ge=1, le=10000)
+    max_tokens: int = Field(default=2000, ge=1, le=10000)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     timeout_ms: int = Field(default=10000, ge=1000, le=300000)
 

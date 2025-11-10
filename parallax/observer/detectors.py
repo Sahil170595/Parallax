@@ -202,10 +202,18 @@ class Detectors:
             path=str(out),
             clip=bounds,
         )
-        
+
         capture_cfg = self.config.get("capture", {})
-        redact_screenshot(out, [bounds], capture_cfg)
-        
+        # Screenshot is already cropped to the dialog, so redact coordinates
+        # need to be relative to the clipped image (origin at 0,0).
+        normalized_region = {
+            "x": 0,
+            "y": 0,
+            "width": max(0, int(bounds.get("width", 0))),
+            "height": max(0, int(bounds.get("height", 0))),
+        }
+        redact_screenshot(out, [normalized_region], capture_cfg)
+
         return filename
 
     async def _detect_toast(self, page) -> bool:

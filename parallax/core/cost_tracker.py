@@ -25,11 +25,13 @@ llm_cost_per_call = Histogram(
 )
 
 
-# Pricing per 1M tokens (as of 2025, approximate)
+# Pricing per 1M tokens (as of November 2025, approximate)
+# Latest models: GPT-5 (best performance), GPT-4.1-mini (cost-effective), GPT-4o-mini (alternative)
 PRICING: Dict[str, Dict[str, Dict[str, float]]] = {
     "openai": {
-        "gpt-4.1-mini": {"input": 0.15, "output": 0.60},
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-5": {"input": 1.25, "output": 5.00},  # Latest flagship model (released Aug 2025)
+        "gpt-4.1-mini": {"input": 0.15, "output": 0.60},  # Cost-effective with good performance
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},  # Alternative cost-effective option
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4-turbo": {"input": 10.00, "output": 30.00},
         "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},

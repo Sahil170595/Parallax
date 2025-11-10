@@ -23,13 +23,13 @@ class VisionAnalyzer:
         
         if self.provider == "openai":
             try:
-                import openai
                 import os
+                from openai import AsyncOpenAI
                 # Check if API key is available
                 api_key = os.getenv("OPENAI_API_KEY")
                 if not api_key:
                     return None
-                self._client = openai.OpenAI(api_key=api_key)
+                self._client = AsyncOpenAI(api_key=api_key)
                 return self._client
             except (ImportError, Exception) as e:
                 log.warning("openai_not_available", message=f"OpenAI not available: {e}")
@@ -118,55 +118,27 @@ Return JSON format:
             return await self._heuristic_completion(screenshot_bytes, task_context, workflow_states)
     
     async def _analyze_openai(self, client, screenshot_b64: str, prompt: str) -> Dict[str, Any]:
-        """Analyze using OpenAI vision model."""
-        import openai
-        
-        # Handle both sync and async clients
-        if hasattr(client, 'chat') and hasattr(client.chat, 'completions'):
-            # Sync client
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # Fast and cost-effective
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{screenshot_b64}"
-                                }
-                            },
-                            {"type": "text", "text": prompt}
-                        ]
-                    }
-                ],
-                max_tokens=500,
-                response_format={"type": "json_object"},
-            )
-        else:
-            # Async client
-            from openai import AsyncOpenAI
-            async_client = AsyncOpenAI() if not isinstance(client, AsyncOpenAI) else client
-            response = await async_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{screenshot_b64}"
-                                }
-                            },
-                            {"type": "text", "text": prompt}
-                        ]
-                    }
-                ],
-                max_tokens=500,
-                response_format={"type": "json_object"},
-            )
-        
+        """Analyze using OpenAI vision model (async)."""
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",  # Cost-effective vision model. GPT-5 requires temperature=1 which is less deterministic.
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_b64}"
+                            }
+                        },
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ],
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+
         import json
         content = response.choices[0].message.content
         result = json.loads(content)

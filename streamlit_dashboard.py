@@ -4,6 +4,7 @@ Beautiful Streamlit Dashboard for Parallax Workflow Visualization
 import asyncio
 import hashlib
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -101,7 +102,7 @@ def load_config() -> ParallaxConfig:
     return ParallaxConfig.from_yaml(cfg_path)
 
 
-def planner_from_config(cfg: ParallaxConfig):
+def planner_from_config(cfg: ParallaxConfig) -> OpenAIPlanner | AnthropicPlanner | LocalPlanner:
     """Get planner from config."""
     provider = os.getenv("PARALLAX_PROVIDER", cfg.provider)
     if provider == "openai":
@@ -122,6 +123,23 @@ def planner_from_config(cfg: ParallaxConfig):
 def slugify(text: str) -> str:
     """Convert text to URL-safe slug."""
     return "-".join("".join(c.lower() if c.isalnum() else " " for c in text).split())
+
+
+def normalize_app_name(app_name: str) -> tuple[str, str]:
+    """
+    Normalize the user-provided app name.
+
+    Returns:
+        Tuple of (label_for_display, slug_for_paths)
+
+    Raises:
+        ValueError: if the app name is empty after trimming whitespace.
+    """
+    label = (app_name or "").strip()
+    if not label:
+        raise ValueError("App name cannot be empty.")
+    slug = slugify(label) or "app"
+    return label, slug
 
 
 def load_datasets() -> List[Dict[str, Any]]:
@@ -164,10 +182,20 @@ def load_states_from_jsonl(path: Path) -> List[Dict[str, Any]]:
     if not steps_path.exists():
         return states
     
+    skipped = 0
     with open(steps_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             if line.strip():
-                states.append(json.loads(line))
+                try:
+                    states.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    # Log warning but continue processing
+                    skipped += 1
+                    logging.warning(f"Failed to parse JSON at line {line_num} in {steps_path}: {e}")
+                    continue
+    
+    if skipped > 0:
+        st.warning(f"⚠️ Skipped {skipped} malformed entries in {steps_path}")
     
     return states
 
@@ -190,7 +218,11 @@ def load_states_from_db(path: Path) -> List[Dict[str, Any]]:
         
         for row in cursor.fetchall():
             state_id, url, description, has_modal, action, state_signature, metadata_json = row
-            metadata = json.loads(metadata_json) if metadata_json else {}
+            try:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+            except json.JSONDecodeError as e:
+                logging.warning(f"Failed to parse metadata JSON for state {state_id}: {e}")
+                metadata = {}
             
             # Get screenshots
             cursor.execute("""
@@ -262,6 +294,22 @@ def main():
         show_analytics_page()
 
 
+def validate_url(url: str) -> str:
+    """Validate and normalize URL."""
+    from urllib.parse import urlparse
+    
+    url = url.strip()
+    if not url:
+        raise ValueError("URL cannot be empty")
+    
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid URL: '{url}'. URL must include scheme (http:// or https://) and domain.")
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"URL must use http or https: '{url}'")
+    return url
+
+
 def show_run_task_page(cfg: ParallaxConfig):
     """Show the run new task page."""
     st.header("🚀 Run New Task")
@@ -303,6 +351,13 @@ def show_run_task_page(cfg: ParallaxConfig):
         submitted = st.form_submit_button("🚀 Run Task", use_container_width=True)
     
     if submitted and task:
+        # Validate URL before running
+        try:
+            start_url = validate_url(start_url)
+        except ValueError as e:
+            st.error(f"❌ Invalid URL: {e}")
+            return
+        
         cfg.capture.multi_viewport = capture_multi
         run_task_execution(task, app_name, start_url, action_budget, cfg)
 
@@ -310,15 +365,12 @@ def show_run_task_page(cfg: ParallaxConfig):
 def run_task_execution(task: str, app_name: str, start_url: str, action_budget: int, cfg: ParallaxConfig):
     """Execute a task and show real-time progress."""
     ensure_metrics_server(cfg.metrics.prometheus_port)
-    
-    app_label = (app_name or "").strip()
-    if not app_label:
-        st.error("Please provide an app name before running a workflow.")
-        return
 
-    app_dir_name = slugify(app_label)
-    if not app_dir_name:
-        app_dir_name = "app"
+    try:
+        app_label, app_dir_name = normalize_app_name(app_name)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
     
     progress_container = st.container()
     status_container = st.container()
@@ -500,6 +552,7 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                         nav_report = navigator.finalize(plan, nav_context)
 
                         from parallax.core.completion import CompletionValidationError, validate_completion
+                        completion_warning: Optional[str] = None
                         try:
                             validate_completion(
                                 plan,
@@ -507,7 +560,10 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                                 min_targets=cfg.completion.min_targets,
                             )
                         except CompletionValidationError as exc:
-                            raise RuntimeError(f"Completion validation failed: {', '.join(exc.missing)}") from exc
+                            completion_warning = (
+                                f"Completion validation failed. Missing targets: {', '.join(exc.missing)}"
+                            )
+                            st.warning(completion_warning)
                         
                         # Save dataset
                         archivist = Archivist(datasets_dir, failure_store=failure_store)
@@ -519,18 +575,18 @@ def run_task_execution(task: str, app_name: str, start_url: str, action_budget: 
                         if tracer and not tracer_stopped:
                             try:
                                 await tracer.stop(trace_zip_path)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.warning(f"Error during tracer cleanup: {e}")
                         if context:
                             try:
                                 await context.close()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.warning(f"Error during context cleanup: {e}")
                         if browser:
                             try:
                                 await browser.close()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.warning(f"Error during browser cleanup: {e}")
             
             # Run execution
             root, states = asyncio.run(execute_workflow())
@@ -654,7 +710,6 @@ def view_dataset_details(path: Path):
         })
     
     if timeline_data:
-        df = px.data.tips()  # Dummy data for structure
         fig = go.Figure()
         
         # Add scatter plot for states
@@ -785,4 +840,3 @@ def show_analytics_page():
 
 if __name__ == "__main__":
     main()
-

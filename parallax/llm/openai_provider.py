@@ -61,7 +61,7 @@ except Exception:  # pragma: no cover
 class OpenAIPlanner:
     def __init__(
         self,
-        model: str = "gpt-4.1-mini",
+        model: str = "gpt-4.1-mini",  # Recommended: gpt-4.1-mini (reliable, cost-effective). GPT-5 doesn't support temperature control.
         timeout: float = 30.0,
         max_retries: int = 3,
         rate_limit_per_minute: int = 50,
@@ -238,8 +238,8 @@ Generate a plan for the user task."""
                             {"role": "user", "content": user_message},
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.2,
-                        max_tokens=1200,
+                        temperature=0.2,  # Low temperature for deterministic output
+                        max_tokens=2000,  # Increased to handle complex workflows
                     ),
                     timeout=self.timeout,
                 )
@@ -267,8 +267,10 @@ Generate a plan for the user task."""
         self.cost_tracker.track_llm_call("openai", self.model, input_tokens, output_tokens)
         
         content = resp.choices[0].message.content or "{}"
+        log.debug("llm_response_content", content_preview=content[:500], content_length=len(content))
         try:
             data = extract_json_from_content(content)
+            log.debug("json_extracted", steps_count=len(data.get("steps", [])))
         except (ValueError, json.JSONDecodeError) as e:
             log.error("json_extraction_failed", error=str(e), content_preview=content[:200])
             raise LLMAPIError("openai", None, f"Failed to extract JSON from LLM response: {e}", retryable=False) from e

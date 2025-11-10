@@ -92,12 +92,12 @@ llm:
   provider: openai  # or anthropic | local | auto
 ```
 
-### How do I enable vision features?
+### How do I enable/disable vision features?
 
-Edit `configs/config.yaml`:
+Vision is enabled by default. To disable, edit `configs/config.yaml`:
 ```yaml
 vision:
-  enabled: true
+  enabled: false  # Disable vision fallback
   provider: openai
 ```
 

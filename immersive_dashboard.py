@@ -7,38 +7,73 @@ Run with:
 """
 from __future__ import annotations
 
+import html
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
-DATASETS_DIR = Path("datasets")
+DATASETS_DIR = Path(os.getenv("PARALLAX_DATASETS_DIR", "datasets")).expanduser()
+DATASETS_BASE = DATASETS_DIR.resolve()
 DEFAULT_POSTER = "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=800&q=80"
+MAX_STORYBOARD_IMAGES = 4
+LOGGER = logging.getLogger(__name__)
 
 
 @st.cache_data(show_spinner=False)
 def _load_states(dataset_dir: Path) -> List[Dict[str, Any]]:
+    """
+    Load workflow states from the dataset directory with basic validation.
+    """
     steps_file = dataset_dir / "steps.jsonl"
     if not steps_file.exists():
         return []
     states: List[Dict[str, Any]] = []
-    with steps_file.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                states.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    skipped = 0
+    try:
+        with steps_file.open("r", encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    states.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    skipped += 1
+                    LOGGER.warning(
+                        "Skipping invalid JSON in %s at line %s: %s",
+                        steps_file,
+                        line_no,
+                        exc,
+                    )
+    except OSError as exc:
+        LOGGER.error("Unable to read %s: %s", steps_file, exc)
+        return []
+    if skipped:
+        LOGGER.warning("Skipped %s malformed entries in %s", skipped, steps_file)
     return states
 
 
+def _is_within_base(path: Path, base: Path) -> bool:
+    try:
+        path.resolve().relative_to(base)
+        return True
+    except ValueError:
+        LOGGER.warning("Skipping path outside dataset directory: %s", path)
+        return False
+
+
+@st.cache_data(show_spinner=False, ttl=60)
 def _scan_datasets() -> List[Dict[str, Any]]:
+    """
+    Return available datasets without eagerly loading state payloads.
+    """
     datasets: List[Dict[str, Any]] = []
     if not DATASETS_DIR.exists():
         return datasets
@@ -46,17 +81,20 @@ def _scan_datasets() -> List[Dict[str, Any]]:
     for app_dir in DATASETS_DIR.iterdir():
         if not app_dir.is_dir():
             continue
+        if not _is_within_base(app_dir, DATASETS_BASE):
+            continue
         for task_dir in app_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+            if not _is_within_base(task_dir, DATASETS_BASE):
+                continue
             steps = task_dir / "steps.jsonl"
             if steps.exists():
-                states = _load_states(task_dir)
                 datasets.append(
                     {
                         "app": app_dir.name,
                         "task": task_dir.name.replace("-", " ").title(),
-                        "path": task_dir,
-                        "states_count": len(states),
-                        "states": states,
+                        "path": task_dir.resolve(),
                     }
                 )
     return sorted(datasets, key=lambda d: d["task"].lower())
@@ -69,6 +107,8 @@ def _hero_section(dataset: Dict[str, Any]) -> None:
     total_critical = sum(
         1 for s in states if s.get("metadata", {}).get("significance") == "critical"
     )
+    task_name = html.escape(dataset["task"])
+    app_label = html.escape(dataset["app"].title())
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -76,9 +116,9 @@ def _hero_section(dataset: Dict[str, Any]) -> None:
             f"""
             <div class="hero-card">
                 <p class="eyebrow">Live Workflow Story</p>
-                <h1 class="hero-title">{dataset['task']}</h1>
+                <h1 class="hero-title">{task_name}</h1>
                 <p class="hero-subtitle">
-                    {dataset['app'].title()} • {len(states)} captured states •
+                    {app_label} &middot; {len(states)} captured states &middot;
                     {total_critical} critical milestones
                 </p>
             </div>
@@ -150,21 +190,28 @@ def _storyboard(states: List[Dict[str, Any]], dataset_dir: Path) -> None:
     if not states:
         return
     st.markdown("### 🎬 Cinematic Storyboard")
-    chunk = min(4, len(states))
+    chunk = min(MAX_STORYBOARD_IMAGES, len(states))
     cols = st.columns(chunk)
-    for idx in range(chunk):
-        state = states[idx]
+    for idx, state in enumerate(states[:chunk]):
         with cols[idx]:
+            action = str(state.get("action") or "N/A")
+            significance = str(
+                state.get("metadata", {}).get("significance", "optional")
+            ).title()
             screenshot = _resolve_screenshot(state, dataset_dir)
             if screenshot:
                 st.image(screenshot, use_container_width=True)
+            else:
+                st.caption("Screenshot unavailable for this step.")
             st.caption(
-                f"Step {idx + 1}: {state.get('action', 'N/A').title()} · "
-                f"{state.get('metadata', {}).get('significance', 'optional').title()}"
+                f"Step {idx + 1}: {action.title()} · {significance}"
             )
 
 
 def _resolve_screenshot(state: Dict[str, Any], dataset_dir: Path) -> Optional[Image.Image]:
+    """
+    Resolve a screenshot file from the state metadata, ensuring it stays within the dataset directory.
+    """
     shots = state.get("screenshots") or {}
     filename = (
         shots.get("focus")
@@ -174,12 +221,23 @@ def _resolve_screenshot(state: Dict[str, Any], dataset_dir: Path) -> Optional[Im
     )
     if not filename:
         return None
-    path = dataset_dir / filename
-    if not path.exists():
-        return None
+
+    candidate = dataset_dir / filename
     try:
-        return Image.open(path)
-    except Exception:
+        resolved = candidate.resolve()
+        dataset_base = dataset_dir.resolve()
+        resolved.relative_to(dataset_base)
+    except (OSError, ValueError):
+        LOGGER.warning("Screenshot path escapes dataset directory: %s", candidate)
+        return None
+
+    if not resolved.exists():
+        return None
+
+    try:
+        return Image.open(resolved)
+    except (OSError, UnidentifiedImageError) as exc:
+        LOGGER.warning("Failed to load screenshot %s: %s", resolved, exc)
         return None
 
 
@@ -214,6 +272,9 @@ def _insights(states: List[Dict[str, Any]]) -> None:
 
 def _state_explorer(states: List[Dict[str, Any]], dataset_dir: Path) -> None:
     st.markdown("### 🔎 Deep Dive")
+    if not states:
+        st.info("No states available for detailed exploration.")
+        return
     selected = st.slider("Select Step", 1, len(states), 1)
     state = states[selected - 1]
     screenshot = _resolve_screenshot(state, dataset_dir)
@@ -238,7 +299,11 @@ def _load_report_html(dataset_dir: Path) -> Optional[str]:
     html = dataset_dir / "report.html"
     if not html.exists():
         return None
-    return html.read_text(encoding="utf-8", errors="ignore")
+    try:
+        return html.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        LOGGER.error("Failed to read HTML report %s: %s", html, exc)
+        return None
 
 
 def main() -> None:
@@ -265,14 +330,25 @@ def main() -> None:
             options=list(range(len(datasets))),
             format_func=lambda idx: f"{datasets[idx]['app']} · {datasets[idx]['task']}",
         )
-        selected_dataset = datasets[selection]
+        selected_dataset_meta = datasets[selection]
 
         st.caption("This showcase focuses on storytelling & playback, not re-running tasks.")
-        st.markdown(
-            "[Open original HTML report]"
-            f"(file://{selected_dataset['path'] / 'report.html'})",
-            unsafe_allow_html=True,
-        )
+        report_path = selected_dataset_meta["path"] / "report.html"
+        if report_path.exists():
+            try:
+                report_bytes = report_path.read_bytes()
+            except OSError as exc:
+                LOGGER.error("Failed to read report %s: %s", report_path, exc)
+            else:
+                st.download_button(
+                    label="📥 Download HTML Report",
+                    data=report_bytes,
+                    file_name="report.html",
+                    mime="text/html",
+                )
+
+    selected_dataset = dict(selected_dataset_meta)
+    selected_dataset["states"] = _load_states(selected_dataset_meta["path"])
 
     st.markdown("## ✨ Immersive Workflow Walkthrough")
     _hero_section(selected_dataset)

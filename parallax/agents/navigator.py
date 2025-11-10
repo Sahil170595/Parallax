@@ -269,7 +269,7 @@ class Navigator:
                             action_desc = self._describe_action(step)
                             state = await self.observer.observe(action_desc)
                             if state:
-                                self._workflow_states.append(state.__dict__)
+                                self._workflow_states.append(state)
                         continue
                     except Exception as vision_error:
                         log.warning("vision_fallback_failed", error=str(vision_error))
@@ -311,8 +311,9 @@ class Navigator:
                     if step.selector and await locator.count() > 1:
                         locator = locator.first
                     
-                    # Dismiss modals that might block the click
-                    await self._dismiss_modals_if_safe()
+                    # Only dismiss modals if we're NOT trying to click on a dialog element
+                    if step.role != "dialog" and not (step.selector and "dialog" in step.selector.lower()):
+                        await self._dismiss_modals_if_safe()
                     
                     # Wait for element to be stable and interactable
                     await self._wait_for_element_stable(locator, timeout=5000)
@@ -332,32 +333,29 @@ class Navigator:
                             async with self.page.context.expect_page(timeout=5000) as new_page_info:
                                 await locator.click(timeout=5000)
                             new_page = await new_page_info.value
-                            await new_page.wait_for_load_state("networkidle")
+                            await new_page.wait_for_load_state("domcontentloaded", timeout=10000)
                             # Switch to the new page and update observer reference
                             self.page = new_page
                             if self.observer is not None:
                                 self.observer.page = new_page
                         elif href and (href.startswith("http") or href.startswith("//")):
-                            # External link - wait for navigation
+                            # External link - try navigation wait but don't fail if it doesn't happen
+                            clicked = False
                             try:
-                                async with self.page.expect_navigation(timeout=15000, wait_until="networkidle"):
-                                    await locator.click(timeout=5000)
-                            except Exception:
-                                # If networkidle times out, try domcontentloaded
-                                async with self.page.expect_navigation(timeout=15000, wait_until="domcontentloaded"):
-                                    await locator.click(timeout=5000)
-                                # Wait a bit more for JS to finish
-                                await self.page.wait_for_timeout(2000)
-                        else:
-                            # Same-page navigation - wait for navigation
-                            try:
-                                async with self.page.expect_navigation(timeout=10000, wait_until="networkidle"):
-                                    await locator.click(timeout=5000)
-                            except Exception:
-                                # If networkidle times out, try domcontentloaded
                                 async with self.page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
                                     await locator.click(timeout=5000)
-                                await self.page.wait_for_timeout(1000)
+                                clicked = True
+                            except Exception:
+                                # Navigation might not happen (SPA), just click if we haven't already
+                                if not clicked:
+                                    await locator.click(timeout=5000)
+                            # Wait for page to stabilize
+                            await self.page.wait_for_timeout(1500)
+                        else:
+                            # Same-page click (SPA or dialog) - don't wait for navigation
+                            await locator.click(timeout=5000)
+                            # Wait for any JS to complete
+                            await self.page.wait_for_timeout(1000)
                     except Exception as nav_error:
                         # If navigation wait fails, try click without wait
                         try:
@@ -391,10 +389,16 @@ class Navigator:
                 except Exception as e:
                     if attempt == retries - 1:
                         raise
-                    # Exponential backoff: wait longer on each retry
-                    wait_time = Navigator.CLICK_RETRY_BASE_WAIT_MS * (2 ** attempt)
-                    log.warning("click_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
-                    await self.page.wait_for_timeout(wait_time)
+                    # Check if element became detached/stale - if so, don't wait as long
+                    error_msg = str(e).lower()
+                    if "detached" in error_msg or "stale" in error_msg or "not attached" in error_msg:
+                        log.info("element_detached_retry", attempt=attempt + 1)
+                        await self.page.wait_for_timeout(200)  # Short wait before re-resolving
+                    else:
+                        # Exponential backoff for other errors
+                        wait_time = Navigator.CLICK_RETRY_BASE_WAIT_MS * (2 ** attempt)
+                        log.warning("click_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
+                        await self.page.wait_for_timeout(wait_time)
             return
         if action == "type" and step.value is not None:
             for attempt in range(retries):
@@ -422,9 +426,15 @@ class Navigator:
                 except Exception as e:
                     if attempt == retries - 1:
                         raise
-                    wait_time = Navigator.TYPE_RETRY_BASE_WAIT_MS * (2 ** attempt)
-                    log.warning("type_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
-                    await self.page.wait_for_timeout(wait_time)
+                    # Check if element became detached/stale
+                    error_msg = str(e).lower()
+                    if "detached" in error_msg or "stale" in error_msg or "not attached" in error_msg:
+                        log.info("element_detached_retry_type", attempt=attempt + 1)
+                        await self.page.wait_for_timeout(200)
+                    else:
+                        wait_time = Navigator.TYPE_RETRY_BASE_WAIT_MS * (2 ** attempt)
+                        log.warning("type_retry", attempt=attempt + 1, error=str(e), wait_ms=wait_time)
+                        await self.page.wait_for_timeout(wait_time)
             return
         if action == "submit" and step.selector:
             for attempt in range(retries):
@@ -715,34 +725,50 @@ class Navigator:
     async def _wait_for_element_stable(self, locator, timeout: int = 5000) -> None:
         """Wait for element to be stable (not moving, not changing size)."""
         try:
-            # Wait for element to be visible
-            await locator.wait_for(state="visible", timeout=timeout)
+            # Wait for element to be visible with shorter timeout
+            await locator.wait_for(state="visible", timeout=min(timeout, 3000))
             
-            # Wait for element to be stable (not animating)
-            for _ in range(5):  # Check 5 times
-                await self.page.wait_for_timeout(200)
-                # Element should be in viewport and stable
+            # Quick stability check - just verify element has size
+            try:
                 box = await locator.bounding_box()
-                if box:
-                    # Check if element is reasonably sized and positioned
-                    if box['width'] > 0 and box['height'] > 0:
+                if box and box['width'] > 0 and box['height'] > 0:
+                    return  # Element is stable enough
+            except Exception:
+                pass
+            
+            # If quick check failed, do more thorough check
+            for _ in range(3):  # Reduced from 5 to 3
+                await self.page.wait_for_timeout(150)  # Reduced from 200
+                try:
+                    box = await locator.bounding_box()
+                    if box and box['width'] > 0 and box['height'] > 0:
                         break
+                except Exception:
+                    continue
         except Exception:
             pass  # If stability check fails, continue anyway
 
     async def _wait_for_interactable(self, locator, timeout: int = 5000) -> None:
         """Wait for element to be interactable (visible, enabled, not covered)."""
         try:
-            await locator.wait_for(state="visible", timeout=timeout)
-            # Check if element is enabled
-            is_disabled = await locator.get_attribute("disabled")
-            if is_disabled:
-                raise ValueError("Element is disabled")
+            await locator.wait_for(state="visible", timeout=min(timeout, 3000))
+            
+            # Check if element is enabled (but don't fail if it's not a form element)
+            try:
+                is_disabled = await locator.get_attribute("disabled")
+                if is_disabled and is_disabled != "false":
+                    log.warning("element_disabled", disabled=is_disabled)
+                    raise ValueError("Element is disabled")
+            except ValueError:
+                raise
+            except Exception:
+                pass  # Not a form element, that's fine
+            
             # Check if element is not covered by overlay
             try:
-                await locator.scroll_into_view_if_needed()
+                await locator.scroll_into_view_if_needed(timeout=2000)
             except Exception:
-                pass
+                pass  # Scrolling failed, try clicking anyway
         except Exception as e:
             log.debug("wait_for_interactable_failed", error=str(e))
             raise

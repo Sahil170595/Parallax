@@ -47,6 +47,12 @@ datasets/
 *.db
 trace.zip
 *.png
+test_failures/
+parallax_agents.egg-info/
+
+# Note: datasets/ is ignored because it can be very large (1GB+)
+# Datasets contain screenshots, databases, and traces that bloat git history
+# If you need to track datasets, use Git LFS or only track JSONL/MD/HTML files
 
 # Playwright
 .ms-playwright/
