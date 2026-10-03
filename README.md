@@ -23,6 +23,8 @@ Parallax executes natural-language web tasks end-to-end using Playwright and a p
 - 🌐 **Chrome Support:** Use installed Chrome browser for better compatibility
 - 🔐 **Authentication:** Persistent browser contexts for authenticated workflows
 
+A separately authored [browser demo](https://chimeraforge.vercel.app/projects/agents-and-evaluation/workflow-observatory) rebuilds one narrow piece in TypeScript: a scripted executor on a synthetic scheduling app, with this repository's interactive completion rule (`parallax/core/completion.py`) ported and compared against a check of the committed record. It does not run Parallax, Playwright or a model.
+
 ## Quickstart
 
 Get started in 3 steps:
